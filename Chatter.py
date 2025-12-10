@@ -280,7 +280,6 @@ def load_whisper_backend(model_name, use_faster_whisper, device):
       CUDA: try float16 -> int8_float16 -> int8
       non-CUDA: try int8 -> float32
     """
-    import sys
     if use_faster_whisper:
         _free_vram()  # free memory before constructing Faster-Whisper
         if device == "cuda":
@@ -693,7 +692,6 @@ def whisper_check_mp(candidate_path, target_text, whisper_model, use_faster_whis
     import re
     import string
     import os
-    import sys
 
     try:
         print(f"\033[32m[DEBUG] Whisper checking: {candidate_path}\033[0m")
