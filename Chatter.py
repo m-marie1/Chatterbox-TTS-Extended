@@ -225,15 +225,11 @@ In the Land of Mordor where the Shadows lie.""",
     }
         
 settings = load_settings()        
-# Download both punkt and punkt_tab if missing
+# Download punkt_tab for NLTK tokenization (punkt is deprecated)
 try:
-    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
-    nltk.download('punkt')
-#try:
-#    nltk.data.find('tokenizers/punkt_tab')
-#except LookupError:
-#    nltk.download('punkt_tab')
+    nltk.download('punkt_tab')
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
 
