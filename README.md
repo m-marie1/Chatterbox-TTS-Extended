@@ -212,11 +212,37 @@ Convert any voice to sound like another!
 
 ## 📝 Installation
 
+### 🚀 Google Colab (Recommended for users without GPU)
+
+**NEW!** Run Chatterbox-TTS-Extended on Google Colab with free GPU access:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/m-marie1/Chatterbox-TTS-Extended/blob/main/Chatterbox_TTS_Extended_Colab.ipynb)
+
+**Why use Colab?**
+- ✅ Free GPU access (T4, A100 with Pro)
+- ✅ No local installation required
+- ✅ Pre-configured environment
+- ✅ All features work out-of-the-box
+- ✅ Optimized for artifact reduction with RNNoise
+
+**Quick Start:**
+1. Click the "Open in Colab" badge above
+2. Enable GPU: `Runtime` → `Change runtime type` → `GPU`
+3. Run all cells in order (Shift+Enter)
+4. Wait for the Gradio interface to launch
+5. Generate high-quality, artifact-free audio!
+
+The notebook includes detailed instructions and Colab-optimized settings.
+
+---
+
+### 💻 Local Installation
+
 Requires **Python 3.10.x** and **[FFmpeg](https://ffmpeg.org/download.html)** (on PATH).
 
 Clone the repo:
 ```bash
-git clone https://github.com/petermg/Chatterbox-TTS-Extended
+git clone https://github.com/m-marie1/Chatterbox-TTS-Extended
 ```
 
 Install requirements:
@@ -227,14 +253,10 @@ pip install --force-reinstall -r requirements.txt
 
 Run:
 ```bash
-# Use your repo's main file. For example:
 python Chatter.py
-# or, if your file is named like this branch:
-python zChatter.py
 ```
 
-If [FFmpeg](https://ffmpeg.org/download.html) isn’t in your PATH, place the executable alongside the script or add it to PATH.
-
+If [FFmpeg](https://ffmpeg.org/download.html) isn't in your PATH, place the executable alongside the script or add it to PATH.
 ---
 
 ## 📣 Feedback & Contributions
