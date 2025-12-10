@@ -15,6 +15,7 @@ import string
 import difflib
 import time
 import gc
+import sys
 from chatterbox.src.chatterbox.tts import ChatterboxTTS
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import whisper
@@ -224,15 +225,11 @@ In the Land of Mordor where the Shadows lie.""",
     }
         
 settings = load_settings()        
-# Download both punkt and punkt_tab if missing
+# Download punkt_tab for NLTK tokenization (punkt is deprecated)
 try:
-    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
-    nltk.download('punkt')
-#try:
-#    nltk.data.find('tokenizers/punkt_tab')
-#except LookupError:
-#    nltk.download('punkt_tab')
+    nltk.download('punkt_tab')
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
 
@@ -294,10 +291,12 @@ def load_whisper_backend(model_name, use_faster_whisper, device):
         for ct in candidates:
             try:
                 print(f"[DEBUG] Loading faster-whisper model: {model_name} (device={device}, compute_type={ct})")
+                sys.stdout.flush()
                 return FasterWhisperModel(model_name, device=device, compute_type=ct)
             except Exception as e:
                 last_err = e
                 print(f"[WARN] Failed loading faster-whisper ({ct}): {e}")
+                sys.stdout.flush()
 
         raise RuntimeError(
             f"Failed to load Faster-Whisper '{model_name}' on device={device}. "
@@ -305,6 +304,7 @@ def load_whisper_backend(model_name, use_faster_whisper, device):
         )
     else:
         print(f"[DEBUG] Loading openai-whisper model: {model_name}")
+        sys.stdout.flush()
         _free_vram()  # also free before OpenAI-whisper to reduce fragmentation
         return whisper.load_model(model_name, device=device)
 
@@ -695,6 +695,7 @@ def whisper_check_mp(candidate_path, target_text, whisper_model, use_faster_whis
 
     try:
         print(f"\033[32m[DEBUG] Whisper checking: {candidate_path}\033[0m")
+        sys.stdout.flush()
         if use_faster_whisper:
             segments, info = whisper_model.transcribe(candidate_path)
             transcribed = "".join([seg.text for seg in segments]).strip().lower()
@@ -702,15 +703,18 @@ def whisper_check_mp(candidate_path, target_text, whisper_model, use_faster_whis
             result = whisper_model.transcribe(candidate_path)
             transcribed = result['text'].strip().lower()
         print(f"\033[32m[DEBUG] Whisper transcription: '\033[33m{transcribed}' for candidate '{os.path.basename(candidate_path)}'\033[0m")
+        sys.stdout.flush()
         score = difflib.SequenceMatcher(
             None,
             normalize_for_compare_all_punct(transcribed),
             normalize_for_compare_all_punct(target_text.strip().lower())
         ).ratio()
         print(f"\033[32m[DEBUG] Score: {score:.3f} (target: '\033[33m{target_text}')\033[0m")
+        sys.stdout.flush()
         return (candidate_path, score, transcribed)
     except Exception as e:
         print(f"[ERROR] Whisper transcription failed for {candidate_path}: {e}")
+        sys.stdout.flush()
         return (candidate_path, 0.0, f"ERROR: {e}")
         
         
@@ -1179,6 +1183,7 @@ def process_text_for_tts(
         # -------- WHISPER VALIDATION --------
         if not bypass_whisper_checking:
             print(f"\033[32m[DEBUG] Validating all candidates with Whisper for all chunks (sequentially)...\033[0m")
+            sys.stdout.flush()  # Ensure output is sent to Gradio immediately
 
             # Purge as much memory as possible before initializing Whisper
             _free_vram()
@@ -1202,16 +1207,19 @@ def process_text_for_tts(
                     try:
                         if not os.path.exists(candidate_path) or os.path.getsize(candidate_path) < 1024:
                             print(f"[ERROR] Candidate file missing or too small: {candidate_path}")
+                            sys.stdout.flush()
                             chunk_failed_candidates[chunk_idx].append((0.0, candidate_path, ""))
                             continue
                         path, score, transcribed = whisper_check_mp(candidate_path, sentence_group, whisper_model, use_faster_whisper)
                         print(f"\033[32m[DEBUG] [Chunk {chunk_idx}] {os.path.basename(candidate_path)}: score={score:.3f}, transcript=\033[33m'{transcribed}'\033[0m")
+                        sys.stdout.flush()  # Keep Gradio connection alive with frequent updates
                         if score >= 0.85:
                             chunk_validations[chunk_idx].append((cand['duration'], cand['path']))
                         else:
                             chunk_failed_candidates[chunk_idx].append((score, cand['path'], transcribed))
                     except Exception as e:
                         print(f"[ERROR] Whisper transcription failed for {candidate_path}: {e}")
+                        sys.stdout.flush()
                         chunk_failed_candidates[chunk_idx].append((0.0, candidate_path, ""))
 
                 # Retry block for failed chunks
