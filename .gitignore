@@ -5,3 +5,17 @@ __pycache__
 
 # VS Code
 *.code-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Output and temporary files
+output/
+temp/
+*.wav
+*.mp3
+*.flac
+*.settings.json
+*.settings.csv
+settings.json
