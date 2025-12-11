@@ -6,7 +6,7 @@ import librosa
 import torch
 import torch.nn.functional as F
 import threading
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from safetensors.torch import load_file
 import numpy as np
 
@@ -14,14 +14,14 @@ import numpy as np
 _WATERMARK_LOCK = threading.Lock()
 
 from .models.t3 import T3
+from .models.t3.modules.t3_config import T3Config
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
 from .models.s3gen import S3GEN_SR, S3Gen
-from .models.tokenizers import EnTokenizer, MultilingualTokenizer
+from .models.tokenizers import EnTokenizer, MTLTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
 REPO_ID = "ResembleAI/chatterbox"
-REPO_ID_MULTILINGUAL = "ResembleAI/chatterbox-multilingual"
 
 def punc_norm(text: str) -> str:
     if not text:
@@ -80,24 +80,39 @@ class ChatterboxTTS:
         ckpt_dir = Path(ckpt_dir)
         map_location = torch.device('cpu') if device in ["cpu", "mps"] else None
 
+        # Load voice encoder
         ve = VoiceEncoder()
-        ve.load_state_dict(load_file(ckpt_dir / "ve.safetensors"))
+        if use_multilingual:
+            # Multilingual model uses .pt format
+            ve.load_state_dict(torch.load(ckpt_dir / "ve.pt", weights_only=True, map_location=map_location))
+        else:
+            ve.load_state_dict(load_file(ckpt_dir / "ve.safetensors"))
         ve.to(device).eval()
 
-        t3 = T3()
-        t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
+        # Load T3 model
+        if use_multilingual:
+            t3 = T3(T3Config.multilingual())
+            t3_state = load_file(ckpt_dir / "t3_mtl23ls_v2.safetensors")
+        else:
+            t3 = T3(T3Config.english_only())
+            t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
+        
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
         t3.load_state_dict(t3_state)
         t3.to(device).eval()
 
+        # Load S3Gen
         s3gen = S3Gen()
-        s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
+        if use_multilingual:
+            s3gen.load_state_dict(torch.load(ckpt_dir / "s3gen.pt", weights_only=True, map_location=map_location), strict=False)
+        else:
+            s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
         s3gen.to(device).eval()
 
-        # Use MultilingualTokenizer if multilingual mode is enabled
+        # Load tokenizer
         if use_multilingual:
-            tokenizer = MultilingualTokenizer(str(ckpt_dir / "tokenizer.json"))
+            tokenizer = MTLTokenizer(str(ckpt_dir / "grapheme_mtl_merged_expanded_v1.json"))
         else:
             tokenizer = EnTokenizer(str(ckpt_dir / "tokenizer.json"))
 
@@ -116,14 +131,32 @@ class ChatterboxTTS:
                 print("MPS not available (macOS < 12.3 or no MPS device).")
             device = "cpu"
         
-        # Select repository based on multilingual flag
-        repo_id = REPO_ID_MULTILINGUAL if use_multilingual else REPO_ID
+        print(f"Loading {'multilingual' if use_multilingual else 'English'} model from {REPO_ID}...")
         
-        print(f"Loading {'multilingual' if use_multilingual else 'English'} model from {repo_id}...")
+        if use_multilingual:
+            # Download multilingual model files using snapshot_download
+            ckpt_dir = Path(
+                snapshot_download(
+                    repo_id=REPO_ID,
+                    repo_type="model",
+                    revision="main",
+                    allow_patterns=[
+                        "ve.pt",
+                        "t3_mtl23ls_v2.safetensors",
+                        "s3gen.pt",
+                        "grapheme_mtl_merged_expanded_v1.json",
+                        "conds.pt",
+                        "Cangjie5_TC.json"
+                    ]
+                )
+            )
+        else:
+            # Download English-only model files
+            for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
+                local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath)
+            ckpt_dir = Path(local_path).parent
         
-        for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
-            local_path = hf_hub_download(repo_id=repo_id, filename=fpath)
-        return cls.from_local(Path(local_path).parent, device, use_multilingual=use_multilingual)
+        return cls.from_local(ckpt_dir, device, use_multilingual=use_multilingual)
 
     # ---------- Conditionals helpers ----------
     def _build_conditionals(self, wav_fpath, exaggeration=0.5) -> Conditionals:
