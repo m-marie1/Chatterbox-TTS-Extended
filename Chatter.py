@@ -42,9 +42,11 @@ if MULTILINGUAL_SRC.exists():
 try:
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
     SUPPORTED_LANGUAGES = ChatterboxMultilingualTTS.get_supported_languages()
+    _MTL_IMPORT_ERROR = None
 except Exception as e:  # Defer failures until user selects multilingual
     ChatterboxMultilingualTTS = None
     SUPPORTED_LANGUAGES = {}
+    _MTL_IMPORT_ERROR = e
 
 
 SETTINGS_PATH = "settings.json"
@@ -339,8 +341,29 @@ def get_or_load_model():
 
 def get_or_load_multilingual_model():
     global MTL_MODEL
-    if ChatterboxMultilingualTTS is None:
-        raise RuntimeError("Multilingual model unavailable. Ensure chatterbox-original-multilingual/src is present and importable.")
+    global ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES
+
+    def _ensure_import():
+        global ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES, _MTL_IMPORT_ERROR
+        if ChatterboxMultilingualTTS is not None:
+            return
+        # Try to (re)append the multilingual src path
+        if MULTILINGUAL_SRC.exists():
+            if str(MULTILINGUAL_SRC) not in sys.path:
+                sys.path.insert(0, str(MULTILINGUAL_SRC))
+        try:
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS as _CMTL, SUPPORTED_LANGUAGES as _SL
+            ChatterboxMultilingualTTS = _CMTL
+            SUPPORTED_LANGUAGES = _SL
+            _MTL_IMPORT_ERROR = None
+        except Exception as imp_err:
+            _MTL_IMPORT_ERROR = imp_err
+            raise RuntimeError(
+                "Multilingual model import failed. Ensure chatterbox-original-multilingual/src is on sys.path and dependencies are installed. "
+                f"Original error: {imp_err}"
+            ) from imp_err
+
+    _ensure_import()
     if MTL_MODEL is None:
         print("Multilingual model not loaded, initializing...")
         MTL_MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
