@@ -749,7 +749,8 @@ def process_one_chunk(
     audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
     disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate,
     bypass_whisper_checking,
-    retry_attempt_number=1
+    retry_attempt_number=1,
+    language_id="en"
 ):
     candidates = []
     try:
@@ -807,7 +808,8 @@ def process_one_chunk_deterministic(
     audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
     disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate,
     bypass_whisper_checking,
-    retry_attempt_number=1
+    retry_attempt_number=1,
+    language_id="en"
 ):
     """
     Deterministic per-chunk generation that does NOT mutate global RNG.
@@ -1197,7 +1199,9 @@ def process_text_for_tts(
                         process_one_chunk_deterministic,
                         model, group, idx, gen_index, this_seed,
                         audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
-                        disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking
+                        disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking,
+                        1,  # retry_attempt_number
+                        language_id  # language_id for multilingual support
                     )
                     for idx, group in enumerate(sentence_groups)
                 ]
@@ -1213,7 +1217,9 @@ def process_text_for_tts(
                 idx, candidates = process_one_chunk_deterministic(
                     model, group, idx, gen_index, this_seed,
                     audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
-                    disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking
+                    disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking,
+                    1,  # retry_attempt_number
+                    language_id  # language_id for multilingual support
                 )
                 chunk_candidate_map[idx] = candidates
 
@@ -1286,7 +1292,8 @@ def process_text_for_tts(
                                 audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
                                 disable_watermark, num_candidates_per_chunk, 1,
                                 bypass_whisper_checking,
-                                chunk_attempts[chunk_idx] + 1
+                                chunk_attempts[chunk_idx] + 1,
+                                language_id  # language_id for multilingual support
                             )
                             for chunk_idx in still_need_retry
                         ]
