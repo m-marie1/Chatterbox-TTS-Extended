@@ -110,8 +110,8 @@ class MultilingualTokenizer(EnTokenizer):
         if language_id is not None:
             lang_token = self.LANG_TOKENS.get(language_id.lower())
             if lang_token:
-                # Add language token at the beginning
-                txt = lang_token + txt
+                # Add language token at the beginning with a space
+                txt = lang_token + " " + txt
                 if verbose:
                     logger.info(f"Prepended language token: {lang_token}")
             else:

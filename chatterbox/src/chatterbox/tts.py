@@ -260,7 +260,7 @@ class ChatterboxTTS:
         token_list = []
         for i, txt in enumerate(texts):
             t = punc_norm(txt)
-            lang_id = language_ids[i] if i < len(language_ids) else None
+            lang_id = language_ids[i]
             tt = self.tokenizer.text_to_tokens(t, language_id=lang_id).to(self.device)
             sot = self.t3.hp.start_text_token
             eot = self.t3.hp.stop_text_token
