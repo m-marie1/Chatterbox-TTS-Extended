@@ -926,6 +926,18 @@ def process_one_chunk_deterministic(
     """
     import inspect, traceback
 
+    def _filter_generate_kwargs(_model, _kwargs: dict) -> dict:
+        """Drop kwargs not accepted by the selected backend's `generate()` signature."""
+        try:
+            _sig = inspect.signature(_model.generate)
+        except Exception:
+            return _kwargs
+        # If the backend accepts **kwargs, keep everything.
+        for _p in _sig.parameters.values():
+            if _p.kind == _p.VAR_KEYWORD:
+                return _kwargs
+        return {k: v for k, v in _kwargs.items() if k in _sig.parameters}
+
     candidates = []
     try:
         if not sentence_group.strip():
@@ -967,12 +979,10 @@ def process_one_chunk_deterministic(
                             cfg_weight=cfgw_input,
                             apply_watermark=not disable_watermark,
                             generator=gen,
+                            language_id=language_id,
                         )
-                        sig = inspect.signature(model.generate)
-                        if "language_id" in sig.parameters:
-                            wav = model.generate(**gen_kwargs, language_id=language_id)
-                        else:
-                            wav = model.generate(**gen_kwargs)
+                        gen_kwargs = _filter_generate_kwargs(model, gen_kwargs)
+                        wav = model.generate(**gen_kwargs)
                     else:
                         # Fallback: fork RNG state locally and seed inside the scope
                         with torch.random.fork_rng(devices=devices, enabled=True):
@@ -986,12 +996,10 @@ def process_one_chunk_deterministic(
                                 temperature=temperature_input,
                                 cfg_weight=cfgw_input,
                                 apply_watermark=not disable_watermark,
+                                language_id=language_id,
                             )
-                            sig = inspect.signature(model.generate)
-                            if "language_id" in sig.parameters:
-                                wav = model.generate(**gen_kwargs, language_id=language_id)
-                            else:
-                                wav = model.generate(**gen_kwargs)
+                            gen_kwargs = _filter_generate_kwargs(model, gen_kwargs)
+                            wav = model.generate(**gen_kwargs)
 
                     candidate_path = f"temp/gen{gen_index+1}_chunk_{idx:03d}_cand_{cand_idx+1}_try{retry_attempt_number}_seed{candidate_seed}.wav"
                     torchaudio.save(candidate_path, wav, model.sr)
