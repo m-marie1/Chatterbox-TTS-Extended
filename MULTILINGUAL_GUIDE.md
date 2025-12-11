@@ -6,21 +6,23 @@ This guide explains how to use the new multilingual features in Chatterbox-TTS-E
 
 Chatterbox-TTS-Extended now combines:
 - ✅ **Clean artifact-free output** from the Extended version (RNNoise, Whisper validation, Auto-Editor)
-- ✅ **Multilingual pronunciation** from Chatterbox Multilingual by Resemble AI
-- ✅ **17+ language support** with authentic pronunciation
+- ✅ **Multilingual pronunciation** from the original Chatterbox by Resemble AI
+- ✅ **23 language support** with authentic pronunciation using the real multilingual model
 
 ## Supported Languages
 
-The multilingual model supports the following languages:
+The multilingual model supports 23 languages with authentic pronunciation:
 
 | Language | Code | Language | Code | Language | Code |
 |----------|------|----------|------|----------|------|
 | English | `en` | German | `de` | French | `fr` |
 | Spanish | `es` | Italian | `it` | Portuguese | `pt` |
 | Polish | `pl` | Turkish | `tr` | Russian | `ru` |
-| Dutch | `nl` | Czech | `cs` | Arabic | `ar` |
-| Chinese | `zh` | Japanese | `ja` | Hungarian | `hu` |
-| Korean | `ko` | Hindi | `hi` |  |  |
+| Dutch | `nl` | Arabic | `ar` | Chinese | `zh` |
+| Japanese | `ja` | Korean | `ko` | Hindi | `hi` |
+| Danish | `da` | Greek | `el` | Finnish | `fi` |
+| Hebrew | `he` | Malay | `ms` | Norwegian | `no` |
+| Swedish | `sv` | Swahili | `sw` |  |  |
 
 ## How to Use
 
@@ -236,10 +238,11 @@ See the Colab notebook "Language Learning Content Generation" cell for complete 
 ### Implementation
 
 The multilingual support is implemented through:
-1. **MultilingualTokenizer**: Prepends language ID tokens to text
-2. **Model switching**: Loads from `ResembleAI/chatterbox-multilingual` on HuggingFace
-3. **Language parameter**: Passes through entire generation pipeline
-4. **UI integration**: Checkbox and dropdown for easy switching
+1. **MTLTokenizer**: Full multilingual tokenizer with language-specific preprocessing (from original Chatterbox)
+2. **T3 Model**: Uses multilingual T3 model with 2454 token vocabulary (vs 704 for English)
+3. **Model files**: Loads `t3_mtl23ls_v2.safetensors`, `ve.pt`, `s3gen.pt`, and `grapheme_mtl_merged_expanded_v1.json`
+4. **Language parameter**: Passes through entire generation pipeline with proper preprocessing
+5. **Repository**: Downloads from `ResembleAI/chatterbox` with multilingual model files
 
 ### Compatibility
 
