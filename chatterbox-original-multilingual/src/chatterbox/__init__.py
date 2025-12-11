@@ -1,3 +1,9 @@
+from pkgutil import extend_path
+
+# Allow this package to be split across multiple locations (used by the Extended UI
+# which also provides modules under the `chatterbox` package name).
+__path__ = extend_path(__path__, __name__)
+
 try:
     from importlib.metadata import version, PackageNotFoundError
 except Exception:

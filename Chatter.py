@@ -39,6 +39,19 @@ except Exception:
 _HERE = Path(__file__).resolve().parent
 
 
+def _refresh_chatterbox_pkg_path():
+    """Refresh `chatterbox.__path__` after sys.path changes (pkgutil-style split package)."""
+    try:
+        import importlib
+        import pkgutil
+        import chatterbox as _cb
+        if hasattr(_cb, "__path__"):
+            _cb.__path__ = pkgutil.extend_path(_cb.__path__, _cb.__name__)
+        importlib.invalidate_caches()
+    except Exception:
+        pass
+
+
 def _find_mtl_src():
     """Aggressively search for chatterbox-original-multilingual/src nearby (handles nested Colab clones)."""
     bases = [
@@ -79,6 +92,8 @@ if MULTILINGUAL_SRC:
     for cp in cand_paths:
         if cp.exists() and str(cp) not in sys.path:
             sys.path.insert(0, str(cp))
+
+_refresh_chatterbox_pkg_path()
 
 try:
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
@@ -405,6 +420,11 @@ def get_or_load_multilingual_model():
         for p in scanned:
             if p and p.exists() and str(p) not in sys.path:
                 sys.path.insert(0, str(p))
+
+        _refresh_chatterbox_pkg_path()
+
+        # If a previous attempt left a stub, clear it before retrying.
+        sys.modules.pop("chatterbox.mtl_tts", None)
         try:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS as _CMTL, SUPPORTED_LANGUAGES as _SL
             ChatterboxMultilingualTTS = _CMTL
@@ -412,9 +432,13 @@ def get_or_load_multilingual_model():
             _MTL_IMPORT_ERROR = None
         except Exception as imp_err:
             _MTL_IMPORT_ERROR = imp_err
+            cb_mod = sys.modules.get("chatterbox")
+            cb_path = getattr(cb_mod, "__path__", None)
+            cb_file = getattr(cb_mod, "__file__", None)
             raise RuntimeError(
                 "Multilingual model import failed. Ensure chatterbox-original-multilingual/src is on sys.path and dependencies are installed. "
-                f"Original error: {imp_err}"
+                f"Original error: {imp_err}. "
+                f"Resolved chatterbox: file={cb_file!r} path={list(cb_path) if cb_path else cb_path!r}"
             ) from imp_err
 
     _ensure_import()
