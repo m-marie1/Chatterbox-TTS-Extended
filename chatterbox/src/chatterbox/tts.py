@@ -16,11 +16,12 @@ _WATERMARK_LOCK = threading.Lock()
 from .models.t3 import T3
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
 from .models.s3gen import S3GEN_SR, S3Gen
-from .models.tokenizers import EnTokenizer
+from .models.tokenizers import EnTokenizer, MultilingualTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
 REPO_ID = "ResembleAI/chatterbox"
+REPO_ID_MULTILINGUAL = "ResembleAI/chatterbox-multilingual"
 
 def punc_norm(text: str) -> str:
     if not text:
@@ -62,7 +63,7 @@ class ChatterboxTTS:
     ENC_COND_LEN = 6 * S3_SR
     DEC_COND_LEN = 10 * S3GEN_SR
 
-    def __init__(self, t3: T3, s3gen: S3Gen, ve: VoiceEncoder, tokenizer: EnTokenizer, device: str, conds: Conditionals=None):
+    def __init__(self, t3: T3, s3gen: S3Gen, ve: VoiceEncoder, tokenizer, device: str, conds: Conditionals=None, is_multilingual: bool = False):
         self.sr = S3GEN_SR
         self.t3 = t3
         self.s3gen = s3gen
@@ -72,9 +73,10 @@ class ChatterboxTTS:
         self.conds = conds
         # self.watermarker = perth.PerthImplicitWatermarker()
         self.default_conds = conds
+        self.is_multilingual = is_multilingual
 
     @classmethod
-    def from_local(cls, ckpt_dir, device) -> 'ChatterboxTTS':
+    def from_local(cls, ckpt_dir, device, use_multilingual: bool = False) -> 'ChatterboxTTS':
         ckpt_dir = Path(ckpt_dir)
         map_location = torch.device('cpu') if device in ["cpu", "mps"] else None
 
@@ -93,25 +95,35 @@ class ChatterboxTTS:
         s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
         s3gen.to(device).eval()
 
-        tokenizer = EnTokenizer(str(ckpt_dir / "tokenizer.json"))
+        # Use MultilingualTokenizer if multilingual mode is enabled
+        if use_multilingual:
+            tokenizer = MultilingualTokenizer(str(ckpt_dir / "tokenizer.json"))
+        else:
+            tokenizer = EnTokenizer(str(ckpt_dir / "tokenizer.json"))
 
         conds = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
             conds = Conditionals.load(builtin_voice, map_location=map_location).to(device)
 
-        return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
+        return cls(t3, s3gen, ve, tokenizer, device, conds=conds, is_multilingual=use_multilingual)
 
     @classmethod
-    def from_pretrained(cls, device) -> 'ChatterboxTTS':
+    def from_pretrained(cls, device, use_multilingual: bool = False) -> 'ChatterboxTTS':
         if device == "mps" and not torch.backends.mps.is_available():
             if not torch.backends.mps.is_built():
                 print("MPS not available (PyTorch not built with MPS).")
             else:
                 print("MPS not available (macOS < 12.3 or no MPS device).")
             device = "cpu"
+        
+        # Select repository based on multilingual flag
+        repo_id = REPO_ID_MULTILINGUAL if use_multilingual else REPO_ID
+        
+        print(f"Loading {'multilingual' if use_multilingual else 'English'} model from {repo_id}...")
+        
         for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
-            local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath)
-        return cls.from_local(Path(local_path).parent, device)
+            local_path = hf_hub_download(repo_id=repo_id, filename=fpath)
+        return cls.from_local(Path(local_path).parent, device, use_multilingual=use_multilingual)
 
     # ---------- Conditionals helpers ----------
     def _build_conditionals(self, wav_fpath, exaggeration=0.5) -> Conditionals:
@@ -158,11 +170,12 @@ class ChatterboxTTS:
         temperature: float=0.8,
         apply_watermark: bool=False,
         generator: Optional[torch.Generator]=None,
+        language_id: Optional[str]=None,
         **kwargs,
     ) -> torch.Tensor:
         # text → tokens
         text = punc_norm(text)
-        text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
+        text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id).to(self.device)
         if cfg_weight > 0.0:
             text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # (2, Lt)
         sot = self.t3.hp.start_text_token
@@ -220,19 +233,35 @@ class ChatterboxTTS:
         temperature: float=0.8,
         apply_watermark: bool=False,
         generator: Optional[torch.Generator]=None,
+        language_ids: Optional[List[Optional[str]]]=None,
     ) -> List[torch.Tensor]:
         """
         Vectorized sampler: generate N utterances in one synchronized pass.
         Returns a list of (1, num_samples) tensors, one per input.
+        
+        Args:
+            texts: List of text strings to generate
+            audio_prompt_paths: Optional list of audio prompt paths (one per text)
+            exaggeration: Emotion exaggeration level
+            cfg_weight: CFG weight
+            temperature: Sampling temperature
+            apply_watermark: Whether to apply watermarking
+            generator: Random generator for reproducibility
+            language_ids: Optional list of language IDs (one per text, e.g., 'en', 'de')
         """
         N = len(texts)
         assert N >= 1
+        
+        # If language_ids not provided, use None for all
+        if language_ids is None:
+            language_ids = [None] * N
 
         # Normalize + tokenize, then pad to common length
         token_list = []
-        for txt in texts:
+        for i, txt in enumerate(texts):
             t = punc_norm(txt)
-            tt = self.tokenizer.text_to_tokens(t).to(self.device)
+            lang_id = language_ids[i] if i < len(language_ids) else None
+            tt = self.tokenizer.text_to_tokens(t, language_id=lang_id).to(self.device)
             sot = self.t3.hp.start_text_token
             eot = self.t3.hp.stop_text_token
             tt = F.pad(tt, (1, 0), value=sot)

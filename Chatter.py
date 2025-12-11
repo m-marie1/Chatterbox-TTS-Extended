@@ -222,6 +222,8 @@ In the Land of Mordor where the Shadows lie.""",
         "normalize_lra_slider": 7,
         "sound_words_field": "",
         "use_pyrnnoise_checkbox": False,
+        "use_multilingual_checkbox": False,
+        "language_dropdown": "en",
     }
         
 settings = load_settings()        
@@ -258,6 +260,7 @@ if DEVICE == "cuda":
 # --------------------------------------
 
 MODEL = None
+USE_MULTILINGUAL = False  # Global flag for multilingual model
 
 def _free_vram():
     """
@@ -309,16 +312,37 @@ def load_whisper_backend(model_name, use_faster_whisper, device):
         return whisper.load_model(model_name, device=device)
 
 
-def get_or_load_model():
-    global MODEL
+def get_or_load_model(use_multilingual=None):
+    """
+    Load or return the TTS model.
+    
+    Args:
+        use_multilingual: If provided, forces reload with this mode. 
+                         If None, uses global USE_MULTILINGUAL flag.
+    """
+    global MODEL, USE_MULTILINGUAL
+    
+    # If use_multilingual is explicitly provided and different from current, reload
+    if use_multilingual is not None and MODEL is not None:
+        current_multilingual = getattr(MODEL, 'is_multilingual', False)
+        if use_multilingual != current_multilingual:
+            print(f"Switching from {'multilingual' if current_multilingual else 'English'} to {'multilingual' if use_multilingual else 'English'} model...")
+            MODEL = None
+            USE_MULTILINGUAL = use_multilingual
+    
+    # Use global flag if not specified
+    if use_multilingual is None:
+        use_multilingual = USE_MULTILINGUAL
+    
     if MODEL is None:
-        print("Model not loaded, initializing...")
-        MODEL = ChatterboxTTS.from_pretrained(DEVICE)
+        print(f"Model not loaded, initializing {'multilingual' if use_multilingual else 'English'} model...")
+        MODEL = ChatterboxTTS.from_pretrained(DEVICE, use_multilingual=use_multilingual)
         if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
             MODEL.to(DEVICE)
         if hasattr(MODEL, "eval"):
             MODEL.eval()
         print(f"Model loaded on device: {getattr(MODEL, 'device', 'unknown')}")
+        USE_MULTILINGUAL = use_multilingual
     return MODEL
 
 try:
