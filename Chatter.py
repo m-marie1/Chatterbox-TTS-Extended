@@ -772,7 +772,8 @@ def process_one_chunk(
                         exaggeration=min(exaggeration_input, 1.0),
                         temperature=temperature_input,
                         cfg_weight=cfgw_input,
-                        apply_watermark=not disable_watermark
+                        apply_watermark=not disable_watermark,
+                        language_id=language_id if hasattr(model, 'is_multilingual') and model.is_multilingual else None
                     )
                     
 
@@ -856,6 +857,7 @@ def process_one_chunk_deterministic(
                             cfg_weight=cfgw_input,
                             apply_watermark=not disable_watermark,
                             generator=gen,  # isolated RNG
+                            language_id=language_id if hasattr(model, 'is_multilingual') and model.is_multilingual else None
                         )
                     else:
                         # Fallback: fork RNG state locally and seed inside the scope
@@ -870,6 +872,7 @@ def process_one_chunk_deterministic(
                                 temperature=temperature_input,
                                 cfg_weight=cfgw_input,
                                 apply_watermark=not disable_watermark,
+                                language_id=language_id if hasattr(model, 'is_multilingual') and model.is_multilingual else None
                             )
 
                     candidate_path = f"temp/gen{gen_index+1}_chunk_{idx:03d}_cand_{cand_idx+1}_try{retry_attempt_number}_seed{candidate_seed}.wav"
@@ -960,12 +963,16 @@ def generate_batch_tts(
     sound_words_field: str = "",
     use_faster_whisper: bool = False,
     generate_separate_audio_files: bool = False,
+    use_multilingual: bool = False,
+    language_id: str = "en",
 ) -> list[str]:
     print(f"[DEBUG] Received audio_prompt_path_input: {audio_prompt_path_input!r}")
 
     if not audio_prompt_path_input or (isinstance(audio_prompt_path_input, str) and not os.path.isfile(audio_prompt_path_input)):
         audio_prompt_path_input = None
-    model = get_or_load_model()
+    
+    # Load the appropriate model (may reload if switching between multilingual/English)
+    model = get_or_load_model(use_multilingual=use_multilingual)
 
     # PATCH: Get file basename (to prepend) if a text file was uploaded
     # Support for multiple file uploads
@@ -1008,7 +1015,8 @@ def generate_batch_tts(
                     normalize_audio, normalize_method, normalize_level, normalize_tp,
                     normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
                     bypass_whisper_checking, whisper_model_name, enable_parallel,
-                    num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
+                    num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper,
+                    language_id
                 )
                 all_outputs.extend(output_paths)
             return all_outputs  # Return list of output files
@@ -1039,7 +1047,8 @@ def generate_batch_tts(
             normalize_audio, normalize_method, normalize_level, normalize_tp,
             normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
             bypass_whisper_checking, whisper_model_name, enable_parallel,
-            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
+            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper,
+            language_id
         )
     else:
         # No text file: just process the Text Input box as one job
@@ -1054,7 +1063,8 @@ def generate_batch_tts(
             normalize_audio, normalize_method, normalize_level, normalize_tp,
             normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
             bypass_whisper_checking, whisper_model_name, enable_parallel,
-            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
+            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper,
+            language_id
         )
 
 def process_text_for_tts(
@@ -1093,6 +1103,7 @@ def process_text_for_tts(
     use_longest_transcript_on_fail,
     sound_words_field,
     use_faster_whisper=False,
+    language_id="en",
 ):
 
     
@@ -1622,6 +1633,39 @@ def main(server_name=None, server_port=None, share=False):
                         text_file_input = gr.File(label="Text File(s) (.txt)", file_types=[".txt"], file_count="multiple")
                         separate_files_checkbox = gr.Checkbox(label="Generate separate audio files per text file", value=settings["separate_files_checkbox"])
                         ref_audio_input = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Reference Audio (Optional)")
+                        
+                        # Multilingual support controls
+                        use_multilingual_checkbox = gr.Checkbox(
+                            label="Enable Multilingual Model (supports German, French, Spanish, etc.)",
+                            value=settings.get("use_multilingual_checkbox", False),
+                            info="⚠️ Switching this will reload the model, which may take a minute"
+                        )
+                        language_dropdown = gr.Dropdown(
+                            choices=[
+                                ("English", "en"),
+                                ("German", "de"),
+                                ("French", "fr"),
+                                ("Spanish", "es"),
+                                ("Italian", "it"),
+                                ("Portuguese", "pt"),
+                                ("Polish", "pl"),
+                                ("Turkish", "tr"),
+                                ("Russian", "ru"),
+                                ("Dutch", "nl"),
+                                ("Czech", "cs"),
+                                ("Arabic", "ar"),
+                                ("Chinese", "zh"),
+                                ("Japanese", "ja"),
+                                ("Hungarian", "hu"),
+                                ("Korean", "ko"),
+                                ("Hindi", "hi"),
+                            ],
+                            value=settings.get("language_dropdown", "en"),
+                            label="Target Language",
+                            info="Language for text-to-speech (only used if multilingual model is enabled)",
+                            visible=settings.get("use_multilingual_checkbox", False)
+                        )
+                        
                         export_format_checkboxes = gr.CheckboxGroup(
                             choices=["wav", "mp3", "flac"],
                             value=settings["export_format_checkboxes"],  # default selection
@@ -1743,6 +1787,12 @@ def main(server_name=None, server_port=None, share=False):
 
                         
                         
+                        # Callback to show/hide language dropdown when multilingual checkbox changes
+                        use_multilingual_checkbox.change(
+                            fn=lambda x: gr.update(visible=x),
+                            inputs=use_multilingual_checkbox,
+                            outputs=language_dropdown
+                        )
 
                         output_audio = gr.Files(label="Download Final Audio File(s)")
                         audio_dropdown = gr.Dropdown(label="Click to Preview Any Generated File")
@@ -1785,6 +1835,8 @@ def main(server_name=None, server_port=None, share=False):
                     "sound_words_field",
                     "use_faster_whisper_checkbox",
                     "separate_files_checkbox",
+                    "use_multilingual_checkbox",
+                    "language_dropdown",
                 ]
                 if len(keys) != len(vals):
                     raise ValueError(f"[SETTINGS ERROR] collect_ui_settings: Number of values ({len(vals)}) does not match keys ({len(keys)})!")
@@ -1835,7 +1887,9 @@ def main(server_name=None, server_port=None, share=False):
                     use_longest_transcript_on_fail_checkbox, #32
                     sound_words_field,            #33
                     use_faster_whisper_checkbox,  #34
-                    separate_files_checkbox       #35
+                    separate_files_checkbox,      #35
+                    use_multilingual_checkbox,    #36
+                    language_dropdown             #37
                 ],
                 outputs=[output_audio, audio_dropdown, audio_preview],
             )
