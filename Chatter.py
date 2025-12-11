@@ -37,18 +37,46 @@ except Exception:
 
 # --- Multilingual model path + import ---
 _HERE = Path(__file__).resolve().parent
-# Candidate locations for multilingual src (handles cases where repo is nested once more in Colab)
-_MTL_CANDIDATES = [
-    _HERE / "chatterbox-original-multilingual" / "src",
-    _HERE.parent / "chatterbox-original-multilingual" / "src",
-]
-MULTILINGUAL_SRC = None
-for _cand in _MTL_CANDIDATES:
-    if _cand.exists():
-        MULTILINGUAL_SRC = _cand
-        if str(_cand) not in sys.path:
-            sys.path.insert(0, str(_cand))
-        break
+
+
+def _find_mtl_src():
+    """Aggressively search for chatterbox-original-multilingual/src nearby (handles nested Colab clones)."""
+    bases = {
+        _HERE,
+        _HERE.parent,
+        _HERE.parent.parent,
+        Path("/content/Chatterbox-TTS-Extended"),
+        Path("/content/Chatterbox-TTS-Extended/Chatterbox-TTS-Extended"),
+    }
+    candidates = []
+    for b in bases:
+        candidates.append(b / "chatterbox-original-multilingual" / "src")
+        # Also look for nested duplicates
+        if b.exists():
+            for p in b.glob("**/chatterbox-original-multilingual/src"):
+                candidates.append(p)
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+MULTILINGUAL_SRC = _find_mtl_src()
+_MTL_CANDIDATES = []
+if MULTILINGUAL_SRC:
+    _MTL_CANDIDATES.append(MULTILINGUAL_SRC)
+
+# Proactively add all discovered candidates to sys.path (highest priority first)
+if MULTILINGUAL_SRC:
+    cand_paths = [MULTILINGUAL_SRC]
+    # Add a couple of common fallbacks explicitly
+    cand_paths += [
+        Path("/content/Chatterbox-TTS-Extended/chatterbox-original-multilingual/src"),
+        Path("/content/Chatterbox-TTS-Extended/Chatterbox-TTS-Extended/chatterbox-original-multilingual/src"),
+    ]
+    for cp in cand_paths:
+        if cp.exists() and str(cp) not in sys.path:
+            sys.path.insert(0, str(cp))
 
 try:
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
@@ -358,16 +386,23 @@ def get_or_load_multilingual_model():
         global ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES, _MTL_IMPORT_ERROR
         if ChatterboxMultilingualTTS is not None:
             return
-        # Try to (re)append the multilingual src path
-        if MULTILINGUAL_SRC and MULTILINGUAL_SRC.exists():
-            if str(MULTILINGUAL_SRC) not in sys.path:
-                sys.path.insert(0, str(MULTILINGUAL_SRC))
-        else:
-            # Fallback scan in case path changed at runtime
-            for _cand in _MTL_CANDIDATES:
-                if _cand.exists() and str(_cand) not in sys.path:
-                    sys.path.insert(0, str(_cand))
-                    break
+        # Try to (re)append the multilingual src path (aggressive search each call)
+        mtl_src = MULTILINGUAL_SRC or _find_mtl_src()
+        scanned = []
+        # Always scan a fresh set of candidates in case paths change at runtime
+        for p in [mtl_src] if mtl_src else []:
+            scanned.append(p)
+        for p in [Path("/content/Chatterbox-TTS-Extended/chatterbox-original-multilingual/src"),
+                  Path("/content/Chatterbox-TTS-Extended/Chatterbox-TTS-Extended/chatterbox-original-multilingual/src")]:
+            scanned.append(p)
+        # Glob aggressively under /content in case of other nesting
+        content = Path("/content")
+        if content.exists():
+            for p in content.glob("**/chatterbox-original-multilingual/src"):
+                scanned.append(p)
+        for p in scanned:
+            if p and p.exists() and str(p) not in sys.path:
+                sys.path.insert(0, str(p))
         try:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS as _CMTL, SUPPORTED_LANGUAGES as _SL
             ChatterboxMultilingualTTS = _CMTL
