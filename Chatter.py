@@ -41,20 +41,22 @@ _HERE = Path(__file__).resolve().parent
 
 def _find_mtl_src():
     """Aggressively search for chatterbox-original-multilingual/src nearby (handles nested Colab clones)."""
-    bases = {
+    bases = [
         _HERE,
         _HERE.parent,
-        _HERE.parent.parent,
         Path("/content/Chatterbox-TTS-Extended"),
         Path("/content/Chatterbox-TTS-Extended/Chatterbox-TTS-Extended"),
-    }
+    ]
     candidates = []
     for b in bases:
         candidates.append(b / "chatterbox-original-multilingual" / "src")
-        # Also look for nested duplicates
-        if b.exists():
-            for p in b.glob("**/chatterbox-original-multilingual/src"):
-                candidates.append(p)
+        # Shallow glob only under /content to avoid /proc traversal errors
+        if b.exists() and str(b).startswith("/content"):
+            try:
+                for p in b.glob("**/chatterbox-original-multilingual/src"):
+                    candidates.append(p)
+            except Exception:
+                pass
     for c in candidates:
         if c.exists():
             return c
