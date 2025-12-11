@@ -3,7 +3,6 @@
 Chatterbox-TTS-Extended is a *power-user TTS pipeline* for advanced single and batch speech synthesis, voice conversion, and artifact-reduced audio generation. It is based on [Chatterbox-TTS](https://github.com/resemble-ai/chatterbox), but adds:
 
 - **Multi-file input & batch output**
-- **Multilingual support (17+ languages)**
 - **Custom candidate generation & validation**
 - **Rich audio post-processing**
 - **Whisper/faster-whisper validation**
@@ -16,7 +15,6 @@ Chatterbox-TTS-Extended is a *power-user TTS pipeline* for advanced single and b
 ## 📋 Table of Contents
 
 - [Feature Summary Table](#feature-summary-table)
-- [Multilingual Support](#multilingual-support)
 - [Text Input & File Handling](#text-input--file-handling)
 - [Reference Audio](#reference-audio)
 - [Voice/Emotion/Synthesis Controls](#voiceemotionsynthesis-controls)
@@ -41,7 +39,6 @@ Chatterbox-TTS-Extended is a *power-user TTS pipeline* for advanced single and b
 | Feature                                   | UI Exposed?   | Script Logic |
 | ----------------------------------------- | ------------- | ------------ |
 | Text input (box + multi-file upload)      | ✔             | Yes          |
-| **Multilingual TTS (17+ languages)**      | ✔             | Yes          |
 | Reference audio (conditioning)            | ✔             | Yes          |
 | Separate/merge file output                | ✔             | Yes          |
 | Emotion, CFG, temperature, seed           | ✔             | Yes          |
@@ -62,44 +59,6 @@ Chatterbox-TTS-Extended is a *power-user TTS pipeline* for advanced single and b
 | Audio preview & download                  | ✔             | Yes          |
 | Help/Instructions                         | ✔ (Accordion) | Yes          |
 | Voice Conversion (VC tab)                 | ✔             | Yes          |
-
----
-
-## Multilingual Support
-
-**NEW!** Chatterbox-TTS-Extended now supports multilingual TTS with proper pronunciation for 17+ languages:
-
-- **Supported Languages:** English, German, French, Spanish, Italian, Portuguese, Polish, Turkish, Russian, Dutch, Czech, Arabic, Chinese, Japanese, Hungarian, Korean, Hindi
-
-### How to Use
-
-1. **In the UI:** Check "Enable Multilingual Model" and select your target language from the dropdown
-2. **In the Colab Notebook:** Use the Language Learning cell which demonstrates multilingual generation
-3. **Programmatically:** Load the model with `use_multilingual=True` and pass `language_id` parameter
-
-### Features
-
-- ✅ **Authentic pronunciation** for each language
-- ✅ **Compatible with all artifact reduction features** (RNNoise, Whisper validation, Auto-Editor)
-- ✅ **Voice cloning works** across languages with reference audio
-- ✅ **Seamless switching** between English and multilingual models in the UI
-
-### Example Usage
-
-```python
-from chatterbox.src.chatterbox.tts import ChatterboxTTS
-
-# Load multilingual model
-model = ChatterboxTTS.from_pretrained(device="cuda", use_multilingual=True)
-
-# Generate German audio
-wav_de = model.generate("Guten Tag! Wie geht es Ihnen?", language_id="de")
-
-# Generate French audio  
-wav_fr = model.generate("Bonjour! Comment allez-vous?", language_id="fr")
-```
-
-**Note:** The multilingual model is larger (~2-3GB) and will download on first use from `ResembleAI/chatterbox-multilingual` on HuggingFace.
 
 ---
 

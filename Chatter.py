@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import random
 import numpy as np
 import torch
@@ -18,6 +16,7 @@ import difflib
 import time
 import gc
 import sys
+from pathlib import Path
 from chatterbox.src.chatterbox.tts import ChatterboxTTS
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import whisper
@@ -35,6 +34,17 @@ try:
     _PYRNNOISE_AVAILABLE = True
 except Exception:
     _PYRNNOISE_AVAILABLE = False
+
+# --- Multilingual model path + import ---
+MULTILINGUAL_SRC = Path(__file__).resolve().parent / "chatterbox-original-multilingual" / "src"
+if MULTILINGUAL_SRC.exists():
+    sys.path.append(str(MULTILINGUAL_SRC))
+try:
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+    SUPPORTED_LANGUAGES = ChatterboxMultilingualTTS.get_supported_languages()
+except Exception as e:  # Defer failures until user selects multilingual
+    ChatterboxMultilingualTTS = None
+    SUPPORTED_LANGUAGES = {}
 
 
 SETTINGS_PATH = "settings.json"
@@ -191,6 +201,8 @@ One Ring to rule them all, One Ring to find them,
 One Ring to bring them all and in the darkness bind them
 
 In the Land of Mordor where the Shadows lie.""",
+    "tts_variant_dropdown": "extended_en",
+    "language_id_dropdown": "en",
         "separate_files_checkbox": False,
         "export_format_checkboxes": ["flac", "mp3"],
         "disable_watermark_checkbox": True,
@@ -224,8 +236,6 @@ In the Land of Mordor where the Shadows lie.""",
         "normalize_lra_slider": 7,
         "sound_words_field": "",
         "use_pyrnnoise_checkbox": False,
-        "use_multilingual_checkbox": False,
-        "language_dropdown": "en",
     }
         
 settings = load_settings()        
@@ -262,7 +272,7 @@ if DEVICE == "cuda":
 # --------------------------------------
 
 MODEL = None
-USE_MULTILINGUAL = False  # Global flag for multilingual model
+MTL_MODEL = None
 
 def _free_vram():
     """
@@ -314,38 +324,32 @@ def load_whisper_backend(model_name, use_faster_whisper, device):
         return whisper.load_model(model_name, device=device)
 
 
-def get_or_load_model(use_multilingual=None):
-    """
-    Load or return the TTS model.
-    
-    Args:
-        use_multilingual: If provided, forces reload with this mode. 
-                         If None, uses global USE_MULTILINGUAL flag.
-    """
-    global MODEL, USE_MULTILINGUAL
-    
-    # If use_multilingual is explicitly provided and different from current, reload
-    if use_multilingual is not None and MODEL is not None:
-        current_multilingual = getattr(MODEL, 'is_multilingual', False)
-        if use_multilingual != current_multilingual:
-            print(f"Switching from {'multilingual' if current_multilingual else 'English'} to {'multilingual' if use_multilingual else 'English'} model...")
-            MODEL = None
-            USE_MULTILINGUAL = use_multilingual
-    
-    # Use global flag if not specified
-    if use_multilingual is None:
-        use_multilingual = USE_MULTILINGUAL
-    
+def get_or_load_model():
+    global MODEL
     if MODEL is None:
-        print(f"Model not loaded, initializing {'multilingual' if use_multilingual else 'English'} model...")
-        MODEL = ChatterboxTTS.from_pretrained(DEVICE, use_multilingual=use_multilingual)
+        print("Model not loaded, initializing...")
+        MODEL = ChatterboxTTS.from_pretrained(DEVICE)
         if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
             MODEL.to(DEVICE)
         if hasattr(MODEL, "eval"):
             MODEL.eval()
         print(f"Model loaded on device: {getattr(MODEL, 'device', 'unknown')}")
-        USE_MULTILINGUAL = use_multilingual
     return MODEL
+
+
+def get_or_load_multilingual_model():
+    global MTL_MODEL
+    if ChatterboxMultilingualTTS is None:
+        raise RuntimeError("Multilingual model unavailable. Ensure chatterbox-original-multilingual/src is present and importable.")
+    if MTL_MODEL is None:
+        print("Multilingual model not loaded, initializing...")
+        MTL_MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
+        if hasattr(MTL_MODEL, 'to') and str(MTL_MODEL.device) != DEVICE:
+            MTL_MODEL.to(DEVICE)
+        if hasattr(MTL_MODEL, "eval"):
+            MTL_MODEL.eval()
+        print(f"Multilingual model loaded on device: {getattr(MTL_MODEL, 'device', 'unknown')}")
+    return MTL_MODEL
 
 try:
     get_or_load_model()
@@ -746,7 +750,7 @@ def whisper_check_mp(candidate_path, target_text, whisper_model, use_faster_whis
         
 def process_one_chunk(
     model, sentence_group, idx, gen_index, this_seed,
-    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
+    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, language_id,
     disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate,
     bypass_whisper_checking,
     retry_attempt_number=1
@@ -767,16 +771,20 @@ def process_one_chunk(
                 set_seed(candidate_seed)
                 try:
                     print(f"\033[32m[DEBUG] Generating candidate {cand_idx+1} attempt {attempt+1} for chunk {idx}...\033[0m")
-#                    print(f"[TTS DEBUG] audio_prompt_path passed: {audio_prompt_path_input!r}")
-                    wav = model.generate(
-                        sentence_group,
+                    # Call generate with language_id only if supported
+                    gen_kwargs = dict(
+                        sentence_group=sentence_group,
                         audio_prompt_path=audio_prompt_path_input,
                         exaggeration=min(exaggeration_input, 1.0),
                         temperature=temperature_input,
                         cfg_weight=cfgw_input,
                         apply_watermark=not disable_watermark,
-                        language_id=language_id if hasattr(model, 'is_multilingual') and model.is_multilingual else None
                     )
+                    sig = inspect.signature(model.generate)
+                    if "language_id" in sig.parameters:
+                        wav = model.generate(**gen_kwargs, language_id=language_id)
+                    else:
+                        wav = model.generate(**gen_kwargs)
                     
 
                     candidate_path = f"temp/gen{gen_index+1}_chunk_{idx:03d}_cand_{cand_idx+1}_try{retry_attempt_number}_seed{candidate_seed}.wav"
@@ -804,7 +812,7 @@ def process_one_chunk(
 
 def process_one_chunk_deterministic(
     model, sentence_group, idx, gen_index, this_seed,
-    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
+    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, language_id,
     disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate,
     bypass_whisper_checking,
     retry_attempt_number=1
@@ -850,32 +858,39 @@ def process_one_chunk_deterministic(
                         gen_device = "cuda" if on_cuda else "cpu"
                         gen = torch.Generator(device=gen_device)
                         gen.manual_seed(int(candidate_seed) & 0xFFFFFFFFFFFFFFFF)
-
-                        wav = model.generate(
-                            sentence_group,
+                        gen_kwargs = dict(
+                            sentence_group=sentence_group,
                             audio_prompt_path=audio_prompt_path_input,
                             exaggeration=min(exaggeration_input, 1.0),
                             temperature=temperature_input,
                             cfg_weight=cfgw_input,
                             apply_watermark=not disable_watermark,
-                            generator=gen,  # isolated RNG
-                            language_id=language_id if hasattr(model, 'is_multilingual') and model.is_multilingual else None
+                            generator=gen,
                         )
+                        sig = inspect.signature(model.generate)
+                        if "language_id" in sig.parameters:
+                            wav = model.generate(**gen_kwargs, language_id=language_id)
+                        else:
+                            wav = model.generate(**gen_kwargs)
                     else:
                         # Fallback: fork RNG state locally and seed inside the scope
                         with torch.random.fork_rng(devices=devices, enabled=True):
                             torch.manual_seed(int(candidate_seed))
                             if on_cuda:
                                 torch.cuda.manual_seed_all(int(candidate_seed))
-                            wav = model.generate(
-                                sentence_group,
+                            gen_kwargs = dict(
+                                sentence_group=sentence_group,
                                 audio_prompt_path=audio_prompt_path_input,
                                 exaggeration=min(exaggeration_input, 1.0),
                                 temperature=temperature_input,
                                 cfg_weight=cfgw_input,
                                 apply_watermark=not disable_watermark,
-                                language_id=language_id if hasattr(model, 'is_multilingual') and model.is_multilingual else None
                             )
+                            sig = inspect.signature(model.generate)
+                            if "language_id" in sig.parameters:
+                                wav = model.generate(**gen_kwargs, language_id=language_id)
+                            else:
+                                wav = model.generate(**gen_kwargs)
 
                     candidate_path = f"temp/gen{gen_index+1}_chunk_{idx:03d}_cand_{cand_idx+1}_try{retry_attempt_number}_seed{candidate_seed}.wav"
                     torchaudio.save(candidate_path, wav, model.sr)
@@ -931,6 +946,8 @@ def update_audio_preview(selected_path):
 def generate_batch_tts(
     text: str,
     text_file,
+    tts_variant: str,
+    language_id: str,
     audio_prompt_path_input,
     exaggeration_input: float,
     temperature_input: float,
@@ -965,16 +982,11 @@ def generate_batch_tts(
     sound_words_field: str = "",
     use_faster_whisper: bool = False,
     generate_separate_audio_files: bool = False,
-    use_multilingual: bool = False,
-    language_id: str = "en",
 ) -> list[str]:
     print(f"[DEBUG] Received audio_prompt_path_input: {audio_prompt_path_input!r}")
 
     if not audio_prompt_path_input or (isinstance(audio_prompt_path_input, str) and not os.path.isfile(audio_prompt_path_input)):
         audio_prompt_path_input = None
-    
-    # Load the appropriate model (may reload if switching between multilingual/English)
-    model = get_or_load_model(use_multilingual=use_multilingual)
 
     # PATCH: Get file basename (to prepend) if a text file was uploaded
     # Support for multiple file uploads
@@ -1009,6 +1021,7 @@ def generate_batch_tts(
                 output_paths = process_text_for_tts(
                     job_text, base,
                     audio_prompt_path_input,
+                    tts_variant, language_id,
                     exaggeration_input, temperature_input, seed_num_input, cfgw_input,
                     use_pyrnnoise,  # <-- add this
                     use_auto_editor, ae_threshold, ae_margin, export_formats, enable_batching,
@@ -1017,8 +1030,7 @@ def generate_batch_tts(
                     normalize_audio, normalize_method, normalize_level, normalize_tp,
                     normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
                     bypass_whisper_checking, whisper_model_name, enable_parallel,
-                    num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper,
-                    language_id
+                    num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
                 )
                 all_outputs.extend(output_paths)
             return all_outputs  # Return list of output files
@@ -1041,6 +1053,7 @@ def generate_batch_tts(
 
         return process_text_for_tts(
             text, input_basename, audio_prompt_path_input,
+            tts_variant, language_id,
             exaggeration_input, temperature_input, seed_num_input, cfgw_input,
             use_pyrnnoise,
             use_auto_editor, ae_threshold, ae_margin, export_formats, enable_batching,
@@ -1049,14 +1062,14 @@ def generate_batch_tts(
             normalize_audio, normalize_method, normalize_level, normalize_tp,
             normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
             bypass_whisper_checking, whisper_model_name, enable_parallel,
-            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper,
-            language_id
+            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
         )
     else:
         # No text file: just process the Text Input box as one job
         input_basename = "text_input_"
         return process_text_for_tts(
             text, input_basename, audio_prompt_path_input,
+            tts_variant, language_id,
             exaggeration_input, temperature_input, seed_num_input, cfgw_input,
             use_pyrnnoise,
             use_auto_editor, ae_threshold, ae_margin, export_formats, enable_batching,
@@ -1065,14 +1078,15 @@ def generate_batch_tts(
             normalize_audio, normalize_method, normalize_level, normalize_tp,
             normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
             bypass_whisper_checking, whisper_model_name, enable_parallel,
-            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper,
-            language_id
+            num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
         )
 
 def process_text_for_tts(
     text,
     input_basename,
     audio_prompt_path_input,
+    tts_variant,
+    language_id,
     exaggeration_input,
     temperature_input,
     seed_num_input,
@@ -1105,12 +1119,14 @@ def process_text_for_tts(
     use_longest_transcript_on_fail,
     sound_words_field,
     use_faster_whisper=False,
-    language_id="en",
 ):
 
-    
-
-    model = get_or_load_model()
+    lang_id = None
+    if tts_variant == "multilingual_23lang":
+        lang_id = (language_id or "en").lower()
+        model = get_or_load_multilingual_model()
+    else:
+        model = get_or_load_model()
     whisper_model = None
     if not text or len(text.strip()) == 0:
         raise ValueError("No text provided.")
@@ -1196,7 +1212,7 @@ def process_text_for_tts(
                     executor.submit(
                         process_one_chunk_deterministic,
                         model, group, idx, gen_index, this_seed,
-                        audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
+                        audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, lang_id,
                         disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking
                     )
                     for idx, group in enumerate(sentence_groups)
@@ -1212,7 +1228,7 @@ def process_text_for_tts(
             for idx, group in enumerate(sentence_groups):
                 idx, candidates = process_one_chunk_deterministic(
                     model, group, idx, gen_index, this_seed,
-                    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
+                    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, lang_id,
                     disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking
                 )
                 chunk_candidate_map[idx] = candidates
@@ -1283,7 +1299,7 @@ def process_text_for_tts(
                                 chunk_idx,
                                 gen_index,
                                 this_seed,  # base; per-candidate attempts derive inside deterministic function
-                                audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
+                                audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, lang_id,
                                 disable_watermark, num_candidates_per_chunk, 1,
                                 bypass_whisper_checking,
                                 chunk_attempts[chunk_idx] + 1
@@ -1459,6 +1475,8 @@ def process_text_for_tts(
         # Only include relevant fields and NOT the raw text_input
         settings_to_save = {
             "text_input": "",  # Intentionally blank for privacy
+            "tts_variant_dropdown": tts_variant,
+            "language_id_dropdown": language_id,
             "exaggeration_slider": exaggeration_input,
             "temp_slider": temperature_input,
             "seed_input": this_seed,
@@ -1535,7 +1553,7 @@ whisper_model_map = {
 def apply_settings_json(settings_json):
     import json
     if not settings_json:
-        return [gr.update() for _ in range(36)]
+        return [gr.update() for _ in range(38)]
     try:
         with open(settings_json.name, "r", encoding="utf-8") as f:
             loaded = json.load(f)
@@ -1576,48 +1594,53 @@ def apply_settings_json(settings_json):
         if isinstance(nm, (int, float)) or nm not in {"ebu", "peak"}:
             nm = "ebu"
 
+        tv = loaded.get("tts_variant_dropdown", "extended_en")
+        lang = loaded.get("language_id_dropdown", "en")
+
         # --- CRITICAL: return values in EXACT outputs order (36) ---
         return [
             loaded.get("text_input", ""),                              # 0
             None,                                                      # 1 text_file_input (cannot load)
-            _bool(loaded.get("separate_files_checkbox", False), False),# 2
-            loaded.get("audio_prompt_path_input", ""),                 # 3 ref_audio_input (filepath string)
-            loaded.get("export_format_checkboxes", ["wav"]),           # 4
-            _bool(loaded.get("disable_watermark_checkbox", False), False), # 5
-            _int(loaded.get("num_generations_input", 1), 1),           # 6
-            _int(loaded.get("num_candidates_slider", 3), 3),           # 7
-            _int(loaded.get("max_attempts_slider", 3), 3),             # 8
-            _bool(loaded.get("bypass_whisper_checkbox", False), False),# 9
-            wm,                                                        # 10 whisper_model_dropdown (label)
-            _bool(loaded.get("use_faster_whisper_checkbox", True), True), # 11
-            _bool(loaded.get("enable_parallel_checkbox", True), True), # 12
-            _bool(loaded.get("use_longest_transcript_on_fail_checkbox", True), True), # 13
-            _int(loaded.get("num_parallel_workers_slider", 4), 4),     # 14
-            _float(loaded.get("exaggeration_slider", 0.5), 0.5),       # 15
-            _float(loaded.get("cfg_weight_slider", 1.0), 1.0),         # 16
-            _float(loaded.get("temp_slider", 0.75), 0.75),             # 17
-            _int(loaded.get("seed_input", 0), 0),                      # 18
-            _bool(loaded.get("enable_batching_checkbox", False), False), # 19
-            _bool(loaded.get("smart_batch_short_sentences_checkbox", True), True), # 20
-            _bool(loaded.get("to_lowercase_checkbox", True), True),    # 21
-            _bool(loaded.get("normalize_spacing_checkbox", True), True),# 22
-            _bool(loaded.get("fix_dot_letters_checkbox", True), True), # 23
-            _bool(loaded.get("remove_reference_numbers_checkbox", True), True), # 24
-            _bool(loaded.get("use_pyrnnoise_checkbox", False), False), # 25  ✅ position fixed
-            _bool(loaded.get("use_auto_editor_checkbox", False), False),# 26
-            _bool(loaded.get("keep_original_checkbox", False), False), # 27
-            _float(loaded.get("threshold_slider", 0.06), 0.06),        # 28
-            _float(loaded.get("margin_slider", 0.2), 0.2),             # 29
-            _bool(loaded.get("normalize_audio_checkbox", False), False),# 30
-            nm,                                                        # 31 normalize_method_dropdown  ✅
-            _float(loaded.get("normalize_level_slider", -24), -24),    # 32
-            _float(loaded.get("normalize_tp_slider", -2), -2),         # 33
-            _float(loaded.get("normalize_lra_slider", 7), 7),          # 34
-            loaded.get("sound_words_field", ""),                       # 35
+            tv,                                                       # 2 tts_variant_dropdown
+            lang,                                                     # 3 language_id_dropdown
+            _bool(loaded.get("separate_files_checkbox", False), False),# 4
+            loaded.get("audio_prompt_path_input", ""),                 # 5 ref_audio_input (filepath string)
+            loaded.get("export_format_checkboxes", ["wav"]),           # 6
+            _bool(loaded.get("disable_watermark_checkbox", False), False), # 7
+            _int(loaded.get("num_generations_input", 1), 1),           # 8
+            _int(loaded.get("num_candidates_slider", 3), 3),           # 9
+            _int(loaded.get("max_attempts_slider", 3), 3),             # 10
+            _bool(loaded.get("bypass_whisper_checkbox", False), False),# 11
+            wm,                                                        # 12 whisper_model_dropdown (label)
+            _bool(loaded.get("use_faster_whisper_checkbox", True), True), # 13
+            _bool(loaded.get("enable_parallel_checkbox", True), True), # 14
+            _bool(loaded.get("use_longest_transcript_on_fail_checkbox", True), True), # 15
+            _int(loaded.get("num_parallel_workers_slider", 4), 4),     # 16
+            _float(loaded.get("exaggeration_slider", 0.5), 0.5),       # 17
+            _float(loaded.get("cfg_weight_slider", 1.0), 1.0),         # 18
+            _float(loaded.get("temp_slider", 0.75), 0.75),             # 19
+            _int(loaded.get("seed_input", 0), 0),                      # 20
+            _bool(loaded.get("enable_batching_checkbox", False), False), # 21
+            _bool(loaded.get("smart_batch_short_sentences_checkbox", True), True), # 22
+            _bool(loaded.get("to_lowercase_checkbox", True), True),    # 23
+            _bool(loaded.get("normalize_spacing_checkbox", True), True),# 24
+            _bool(loaded.get("fix_dot_letters_checkbox", True), True), # 25
+            _bool(loaded.get("remove_reference_numbers_checkbox", True), True), # 26
+            _bool(loaded.get("use_pyrnnoise_checkbox", False), False), # 27  ✅ position fixed
+            _bool(loaded.get("use_auto_editor_checkbox", False), False),# 28
+            _bool(loaded.get("keep_original_checkbox", False), False), # 29
+            _float(loaded.get("threshold_slider", 0.06), 0.06),        # 30
+            _float(loaded.get("margin_slider", 0.2), 0.2),             # 31
+            _bool(loaded.get("normalize_audio_checkbox", False), False),# 32
+            nm,                                                        # 33 normalize_method_dropdown  ✅
+            _float(loaded.get("normalize_level_slider", -24), -24),    # 34
+            _float(loaded.get("normalize_tp_slider", -2), -2),         # 35
+            _float(loaded.get("normalize_lra_slider", 7), 7),          # 36
+            loaded.get("sound_words_field", ""),                       # 37
         ]
     except Exception as e:
         print(f"[ERROR] Failed to load settings JSON: {e}")
-        return [gr.update() for _ in range(36)]
+        return [gr.update() for _ in range(38)]
 
 
 
@@ -1626,6 +1649,11 @@ def apply_settings_json(settings_json):
 def main(server_name=None, server_port=None, share=False):
     with gr.Blocks() as demo:
         gr.Markdown("# 🎧 Chatterbox TTS Extended")
+        if SUPPORTED_LANGUAGES:
+            langs_line = ", ".join(sorted(SUPPORTED_LANGUAGES.keys()))
+        else:
+            langs_line = "en,de,fr,es,zh,ja,ko"
+        gr.Markdown(f"**Multilingual:** choose `multilingual_23lang` and set Language ID (codes: {langs_line}) for non-English synthesis. Leave `extended_en` for English-only.")
         with gr.Tabs():
             # TTS Tab (your original interface)
             with gr.Tab("TTS & Multi-Gen"):
@@ -1633,41 +1661,22 @@ def main(server_name=None, server_port=None, share=False):
                     with gr.Column():
                         text_input = gr.Textbox(label="Text Input", lines=6, value=settings["text_input"])
                         text_file_input = gr.File(label="Text File(s) (.txt)", file_types=[".txt"], file_count="multiple")
+                        tts_variant_dropdown = gr.Dropdown(
+                            choices=["extended_en", "multilingual_23lang"],
+                            value=settings.get("tts_variant_dropdown", "extended_en"),
+                            label="Model Variant",
+                            info="Use multilingual_23lang for non-English (de/fr/es/zh/etc)."
+                        )
+                        language_choices = sorted(SUPPORTED_LANGUAGES.keys()) if SUPPORTED_LANGUAGES else ["en", "de", "fr", "es", "zh"]
+                        language_id_dropdown = gr.Dropdown(
+                            choices=language_choices,
+                            value=settings.get("language_id_dropdown", "en"),
+                            allow_custom_value=True,
+                            label="Language ID (multilingual only)",
+                            info="Language code like en, de, fr, es, zh. Ignored when using extended_en."
+                        )
                         separate_files_checkbox = gr.Checkbox(label="Generate separate audio files per text file", value=settings["separate_files_checkbox"])
                         ref_audio_input = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Reference Audio (Optional)")
-                        
-                        # Multilingual support controls
-                        use_multilingual_checkbox = gr.Checkbox(
-                            label="Enable Multilingual Model (supports German, French, Spanish, etc.)",
-                            value=settings.get("use_multilingual_checkbox", False),
-                            info="⚠️ Switching this will reload the model, which may take a minute"
-                        )
-                        language_dropdown = gr.Dropdown(
-                            choices=[
-                                ("English", "en"),
-                                ("German", "de"),
-                                ("French", "fr"),
-                                ("Spanish", "es"),
-                                ("Italian", "it"),
-                                ("Portuguese", "pt"),
-                                ("Polish", "pl"),
-                                ("Turkish", "tr"),
-                                ("Russian", "ru"),
-                                ("Dutch", "nl"),
-                                ("Czech", "cs"),
-                                ("Arabic", "ar"),
-                                ("Chinese", "zh"),
-                                ("Japanese", "ja"),
-                                ("Hungarian", "hu"),
-                                ("Korean", "ko"),
-                                ("Hindi", "hi"),
-                            ],
-                            value=settings.get("language_dropdown", "en"),
-                            label="Target Language",
-                            info="Language for text-to-speech (only used if multilingual model is enabled)",
-                            visible=settings.get("use_multilingual_checkbox", False)
-                        )
-                        
                         export_format_checkboxes = gr.CheckboxGroup(
                             choices=["wav", "mp3", "flac"],
                             value=settings["export_format_checkboxes"],  # default selection
@@ -1750,51 +1759,47 @@ def main(server_name=None, server_port=None, share=False):
                             outputs=[
                                 text_input,                          # 0
                                 text_file_input,                     # 1
-                                separate_files_checkbox,             # 2
-                                ref_audio_input,                     # 3
-                                export_format_checkboxes,            # 4
-                                disable_watermark_checkbox,          # 5
-                                num_generations_input,               # 6
-                                num_candidates_slider,               # 7
-                                max_attempts_slider,                 # 8
-                                bypass_whisper_checkbox,             # 9
-                                whisper_model_dropdown,              # 10
-                                use_faster_whisper_checkbox,         # 11
-                                enable_parallel_checkbox,            # 12
-                                use_longest_transcript_on_fail_checkbox, # 13
-                                num_parallel_workers_slider,         # 14
-                                exaggeration_slider,                 # 15
-                                cfg_weight_slider,                   # 16
-                                temp_slider,                         # 17
-                                seed_input,                          # 18
-                                enable_batching_checkbox,            # 19
-                                smart_batch_short_sentences_checkbox,# 20
-                                to_lowercase_checkbox,               # 21
-                                normalize_spacing_checkbox,          # 22
-                                fix_dot_letters_checkbox,            # 23
-                                remove_reference_numbers_checkbox,   # 24
-                                use_pyrnnoise_checkbox,              # 25  <-- added
-                                use_auto_editor_checkbox,            # 26
-                                keep_original_checkbox,              # 27
-                                threshold_slider,                    # 28
-                                margin_slider,                       # 29
-                                normalize_audio_checkbox,            # 30
-                                normalize_method_dropdown,           # 31
-                                normalize_level_slider,              # 32
-                                normalize_tp_slider,                 # 33
-                                normalize_lra_slider,                # 34
-                                sound_words_field,                   # 35
+                                tts_variant_dropdown,                # 2
+                                language_id_dropdown,                # 3
+                                separate_files_checkbox,             # 4
+                                ref_audio_input,                     # 5
+                                export_format_checkboxes,            # 6
+                                disable_watermark_checkbox,          # 7
+                                num_generations_input,               # 8
+                                num_candidates_slider,               # 9
+                                max_attempts_slider,                 # 10
+                                bypass_whisper_checkbox,             # 11
+                                whisper_model_dropdown,              # 12
+                                use_faster_whisper_checkbox,         # 13
+                                enable_parallel_checkbox,            # 14
+                                use_longest_transcript_on_fail_checkbox, # 15
+                                num_parallel_workers_slider,         # 16
+                                exaggeration_slider,                 # 17
+                                cfg_weight_slider,                   # 18
+                                temp_slider,                         # 19
+                                seed_input,                          # 20
+                                enable_batching_checkbox,            # 21
+                                smart_batch_short_sentences_checkbox,# 22
+                                to_lowercase_checkbox,               # 23
+                                normalize_spacing_checkbox,          # 24
+                                fix_dot_letters_checkbox,            # 25
+                                remove_reference_numbers_checkbox,   # 26
+                                use_pyrnnoise_checkbox,              # 27
+                                use_auto_editor_checkbox,            # 28
+                                keep_original_checkbox,              # 29
+                                threshold_slider,                    # 30
+                                margin_slider,                       # 31
+                                normalize_audio_checkbox,            # 32
+                                normalize_method_dropdown,           # 33
+                                normalize_level_slider,              # 34
+                                normalize_tp_slider,                 # 35
+                                normalize_lra_slider,                # 36
+                                sound_words_field,                   # 37
                             ]
                         )
 
                         
                         
-                        # Callback to show/hide language dropdown when multilingual checkbox changes
-                        use_multilingual_checkbox.change(
-                            fn=lambda x: gr.update(visible=x),
-                            inputs=use_multilingual_checkbox,
-                            outputs=language_dropdown
-                        )
 
                         output_audio = gr.Files(label="Download Final Audio File(s)")
                         audio_dropdown = gr.Dropdown(label="Click to Preview Any Generated File")
@@ -1804,6 +1809,8 @@ def main(server_name=None, server_port=None, share=False):
             def collect_ui_settings(*vals):
                 keys = [
                     "text_input",
+                    "tts_variant_dropdown",
+                    "language_id_dropdown",
                     "exaggeration_slider",
                     "temp_slider",
                     "seed_input",
@@ -1837,8 +1844,6 @@ def main(server_name=None, server_port=None, share=False):
                     "sound_words_field",
                     "use_faster_whisper_checkbox",
                     "separate_files_checkbox",
-                    "use_multilingual_checkbox",
-                    "language_dropdown",
                 ]
                 if len(keys) != len(vals):
                     raise ValueError(f"[SETTINGS ERROR] collect_ui_settings: Number of values ({len(vals)}) does not match keys ({len(keys)})!")
@@ -1848,50 +1853,52 @@ def main(server_name=None, server_port=None, share=False):
              
             
 
+            _save_indices = [0, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
+
             run_button.click(
                 fn=lambda *args: (
-                    collect_ui_settings(*([args[0]] + list(args[3:]))),  # text_input + rest of option fields (skipping file/audio)
+                    collect_ui_settings(*[args[i] for i in _save_indices]),
                     generate_and_preview(*args)
                 )[1],
                 inputs=[
                     text_input,                   # 0
                     text_file_input,              # 1
-                    ref_audio_input,              # 2
-                    exaggeration_slider,          # 3
-                    temp_slider,                  # 4
-                    seed_input,                   # 5
-                    cfg_weight_slider,            # 6
-                    use_pyrnnoise_checkbox,       # 7  (NEW)
-                    use_auto_editor_checkbox,     # 8
-                    threshold_slider,             # 9
-                    margin_slider,                #10
-                    export_format_checkboxes,     #11
-                    enable_batching_checkbox,     #12
-                    to_lowercase_checkbox,        #13
-                    normalize_spacing_checkbox,   #14
-                    fix_dot_letters_checkbox,     #15
-                    remove_reference_numbers_checkbox,   #16
-                    keep_original_checkbox,       #17
-                    smart_batch_short_sentences_checkbox,#18
-                    disable_watermark_checkbox,   #19
-                    num_generations_input,        #20
-                    normalize_audio_checkbox,     #21
-                    normalize_method_dropdown,    #22
-                    normalize_level_slider,       #23
-                    normalize_tp_slider,          #24
-                    normalize_lra_slider,         #25
-                    num_candidates_slider,        #26
-                    max_attempts_slider,          #27
-                    bypass_whisper_checkbox,      #28
-                    whisper_model_dropdown,       #29
-                    enable_parallel_checkbox,     #30
-                    num_parallel_workers_slider,  #31
-                    use_longest_transcript_on_fail_checkbox, #32
-                    sound_words_field,            #33
-                    use_faster_whisper_checkbox,  #34
-                    separate_files_checkbox,      #35
-                    use_multilingual_checkbox,    #36
-                    language_dropdown             #37
+                    tts_variant_dropdown,         # 2
+                    language_id_dropdown,         # 3
+                    ref_audio_input,              # 4
+                    exaggeration_slider,          # 5
+                    temp_slider,                  # 6
+                    seed_input,                   # 7
+                    cfg_weight_slider,            # 8
+                    use_pyrnnoise_checkbox,       # 9
+                    use_auto_editor_checkbox,     # 10
+                    threshold_slider,             # 11
+                    margin_slider,                # 12
+                    export_format_checkboxes,     # 13
+                    enable_batching_checkbox,     # 14
+                    to_lowercase_checkbox,        # 15
+                    normalize_spacing_checkbox,   # 16
+                    fix_dot_letters_checkbox,     # 17
+                    remove_reference_numbers_checkbox,   # 18
+                    keep_original_checkbox,       # 19
+                    smart_batch_short_sentences_checkbox,# 20
+                    disable_watermark_checkbox,   # 21
+                    num_generations_input,        # 22
+                    normalize_audio_checkbox,     # 23
+                    normalize_method_dropdown,    # 24
+                    normalize_level_slider,       # 25
+                    normalize_tp_slider,          # 26
+                    normalize_lra_slider,         # 27
+                    num_candidates_slider,        # 28
+                    max_attempts_slider,          # 29
+                    bypass_whisper_checkbox,      # 30
+                    whisper_model_dropdown,       # 31
+                    enable_parallel_checkbox,     # 32
+                    num_parallel_workers_slider,  # 33
+                    use_longest_transcript_on_fail_checkbox, # 34
+                    sound_words_field,            # 35
+                    use_faster_whisper_checkbox,  # 36
+                    separate_files_checkbox       # 37
                 ],
                 outputs=[output_audio, audio_dropdown, audio_preview],
             )
