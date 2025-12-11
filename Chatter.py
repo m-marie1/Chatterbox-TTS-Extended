@@ -36,9 +36,20 @@ except Exception:
     _PYRNNOISE_AVAILABLE = False
 
 # --- Multilingual model path + import ---
-MULTILINGUAL_SRC = Path(__file__).resolve().parent / "chatterbox-original-multilingual" / "src"
-if MULTILINGUAL_SRC.exists():
-    sys.path.append(str(MULTILINGUAL_SRC))
+_HERE = Path(__file__).resolve().parent
+# Candidate locations for multilingual src (handles cases where repo is nested once more in Colab)
+_MTL_CANDIDATES = [
+    _HERE / "chatterbox-original-multilingual" / "src",
+    _HERE.parent / "chatterbox-original-multilingual" / "src",
+]
+MULTILINGUAL_SRC = None
+for _cand in _MTL_CANDIDATES:
+    if _cand.exists():
+        MULTILINGUAL_SRC = _cand
+        if str(_cand) not in sys.path:
+            sys.path.insert(0, str(_cand))
+        break
+
 try:
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
     SUPPORTED_LANGUAGES = ChatterboxMultilingualTTS.get_supported_languages()
@@ -348,9 +359,15 @@ def get_or_load_multilingual_model():
         if ChatterboxMultilingualTTS is not None:
             return
         # Try to (re)append the multilingual src path
-        if MULTILINGUAL_SRC.exists():
+        if MULTILINGUAL_SRC and MULTILINGUAL_SRC.exists():
             if str(MULTILINGUAL_SRC) not in sys.path:
                 sys.path.insert(0, str(MULTILINGUAL_SRC))
+        else:
+            # Fallback scan in case path changed at runtime
+            for _cand in _MTL_CANDIDATES:
+                if _cand.exists() and str(_cand) not in sys.path:
+                    sys.path.insert(0, str(_cand))
+                    break
         try:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS as _CMTL, SUPPORTED_LANGUAGES as _SL
             ChatterboxMultilingualTTS = _CMTL
@@ -796,7 +813,7 @@ def process_one_chunk(
                     print(f"\033[32m[DEBUG] Generating candidate {cand_idx+1} attempt {attempt+1} for chunk {idx}...\033[0m")
                     # Call generate with language_id only if supported
                     gen_kwargs = dict(
-                        sentence_group=sentence_group,
+                        text=sentence_group,
                         audio_prompt_path=audio_prompt_path_input,
                         exaggeration=min(exaggeration_input, 1.0),
                         temperature=temperature_input,
@@ -882,7 +899,7 @@ def process_one_chunk_deterministic(
                         gen = torch.Generator(device=gen_device)
                         gen.manual_seed(int(candidate_seed) & 0xFFFFFFFFFFFFFFFF)
                         gen_kwargs = dict(
-                            sentence_group=sentence_group,
+                            text=sentence_group,
                             audio_prompt_path=audio_prompt_path_input,
                             exaggeration=min(exaggeration_input, 1.0),
                             temperature=temperature_input,
@@ -902,7 +919,7 @@ def process_one_chunk_deterministic(
                             if on_cuda:
                                 torch.cuda.manual_seed_all(int(candidate_seed))
                             gen_kwargs = dict(
-                                sentence_group=sentence_group,
+                                text=sentence_group,
                                 audio_prompt_path=audio_prompt_path_input,
                                 exaggeration=min(exaggeration_input, 1.0),
                                 temperature=temperature_input,
