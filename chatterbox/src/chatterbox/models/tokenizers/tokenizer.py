@@ -53,13 +53,13 @@ def hiragana_normalize(text: str) -> str:
             hira = r["hira"]
 
             # Any kanji in the phrase
-            if any([is_kanji(c) for c in inp]):
+            if any(is_kanji(c) for c in inp):
                 if hira and hira[0] in ["は", "へ"]:  # Safety check for empty hira
                     hira = " " + hira
                 out.append(hira)
 
             # All katakana
-            elif all([is_katakana(c) for c in inp]) if inp else False:  # Safety check for empty inp
+            elif inp and all(is_katakana(c) for c in inp):
                 out.append(r['orig'])
 
             else:
@@ -167,8 +167,8 @@ class ChineseCangjieConverter:
         if code is None:  # e.g. Japanese hiragana
             return None
         index = self.cj2word[code].index(normed_glyph)
-        index = str(index) if index > 0 else ""
-        return code + str(index)
+        index_str = str(index) if index > 0 else ""
+        return code + index_str
     
 
     
