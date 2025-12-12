@@ -55,6 +55,51 @@ def _refresh_chatterbox_pkg_path():
 _MTL_LANGUAGE_CONFIG_CACHE = None
 
 
+def _maybe_download_prompt_audio(url_or_path: str | None, language_id: str | None = None) -> str | None:
+    """Return a local file path for prompt audio.
+
+    - If `url_or_path` is a local path, return it.
+    - If it's an http(s) URL, download to `temp/mtl_prompts/` (cached) and return the local path.
+    """
+    if not url_or_path:
+        return None
+
+    s = str(url_or_path).strip()
+    if not s:
+        return None
+
+    # Local file path
+    if os.path.isfile(s):
+        return s
+
+    if s.startswith("http://") or s.startswith("https://"):
+        try:
+            import urllib.request
+            from urllib.parse import urlparse
+
+            os.makedirs("temp/mtl_prompts", exist_ok=True)
+            parsed = urlparse(s)
+            ext = os.path.splitext(parsed.path)[1] or ".flac"
+            safe_lang = (str(language_id).strip().lower() if language_id else "xx")
+            dest = os.path.join("temp/mtl_prompts", f"{safe_lang}{ext}")
+
+            # Cache hit
+            if os.path.exists(dest) and os.path.getsize(dest) > 1024:
+                return dest
+
+            req = urllib.request.Request(s, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
+                f.write(resp.read())
+            if os.path.exists(dest) and os.path.getsize(dest) > 1024:
+                return dest
+        except Exception as e:
+            print(f"[MTL] Failed to download prompt audio URL: {s} ({e})")
+            return None
+
+    # Unknown / non-existent
+    return None
+
+
 def _get_default_mtl_prompt_audio(language_id: str | None) -> str | None:
     """Return the multilingual repo's per-language default prompt audio URL (if available).
 
@@ -1184,13 +1229,18 @@ def generate_batch_tts(
 ) -> list[str]:
     print(f"[DEBUG] Received audio_prompt_path_input: {audio_prompt_path_input!r}")
 
-    if not audio_prompt_path_input or (isinstance(audio_prompt_path_input, str) and not os.path.isfile(audio_prompt_path_input)):
+    # Normalize prompt audio path:
+    # - If user uploaded a local file, keep it.
+    # - If multilingual and none provided, use per-language default prompt (URL) and download it locally.
+    # - If a URL is provided, download it locally.
+    if not audio_prompt_path_input:
         audio_prompt_path_input = None
 
-    # Multilingual: if user didn't provide a reference, fall back to the original multilingual demo's
-    # per-language default prompt. This avoids the "generic" built-in voice drifting toward English.
     if tts_variant == "multilingual_23lang" and audio_prompt_path_input is None:
         audio_prompt_path_input = _get_default_mtl_prompt_audio(language_id)
+
+    if isinstance(audio_prompt_path_input, str):
+        audio_prompt_path_input = _maybe_download_prompt_audio(audio_prompt_path_input, language_id=language_id)
 
     # PATCH: Get file basename (to prepend) if a text file was uploaded
     # Support for multiple file uploads
