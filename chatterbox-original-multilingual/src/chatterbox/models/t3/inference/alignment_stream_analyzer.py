@@ -90,8 +90,23 @@ class AlignmentStreamAnalyzer:
         """
         Emits an AlignmentAnalysisResult into the output queue, and potentially modifies the logits to force an EOS.
         """
-        # extract approximate alignment matrix chunk (1 frame at a time after the first chunk)
-        aligned_attn = torch.stack(self.last_aligned_attns).mean(dim=0) # (N, N)
+        # Extract approximate alignment matrix chunk (1 frame at a time after the first chunk)
+        #
+        # NOTE: In practice, some attention hooks may not fire (None entries) and/or
+        # different aligned heads can yield different shapes between the initial chunk
+        # and subsequent KV-cached steps. We must be robust here and never crash TTS.
+        valid_attns = [a for a in self.last_aligned_attns if isinstance(a, torch.Tensor)]
+        if not valid_attns:
+            return logits
+
+        # Crop all heads to the smallest common shape so we can stack/mean safely.
+        min_t0 = min(int(a.shape[0]) for a in valid_attns)
+        min_ti = min(int(a.shape[1]) for a in valid_attns)
+        if min_t0 <= 0 or min_ti <= 0:
+            return logits
+
+        cropped = [a[:min_t0, :min_ti] for a in valid_attns]
+        aligned_attn = torch.stack(cropped, dim=0).mean(dim=0)  # (N, N)
         i, j = self.text_tokens_slice
         if self.curr_frame_pos == 0:
             # first chunk has conditioning info, text tokens, and BOS token

@@ -52,6 +52,46 @@ def _refresh_chatterbox_pkg_path():
         pass
 
 
+_MTL_LANGUAGE_CONFIG_CACHE = None
+
+
+def _get_default_mtl_prompt_audio(language_id: str | None) -> str | None:
+    """Return the multilingual repo's per-language default prompt audio URL (if available).
+
+    This matches the behavior of `chatterbox-original-multilingual/multilingual_app.py`.
+    Implemented via AST literal parsing to avoid importing the full Gradio app.
+    """
+    global _MTL_LANGUAGE_CONFIG_CACHE
+    if not language_id:
+        return None
+    lang = str(language_id).strip().lower()
+    if not lang:
+        return None
+
+    if _MTL_LANGUAGE_CONFIG_CACHE is None:
+        cfg = {}
+        try:
+            mtl_app = _HERE / "chatterbox-original-multilingual" / "multilingual_app.py"
+            if mtl_app.exists():
+                import ast
+                tree = ast.parse(mtl_app.read_text(encoding="utf-8"))
+                for node in tree.body:
+                    if isinstance(node, ast.Assign):
+                        for tgt in node.targets:
+                            if isinstance(tgt, ast.Name) and tgt.id == "LANGUAGE_CONFIG":
+                                cfg = ast.literal_eval(node.value)  # dict literal of strings
+                                raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            cfg = {}
+        _MTL_LANGUAGE_CONFIG_CACHE = cfg
+
+    entry = (_MTL_LANGUAGE_CONFIG_CACHE or {}).get(lang) or {}
+    audio = entry.get("audio")
+    return audio if isinstance(audio, str) and audio.strip() else None
+
+
 def _find_mtl_src():
     """Aggressively search for chatterbox-original-multilingual/src nearby (handles nested Colab clones)."""
     bases = [
@@ -267,8 +307,8 @@ In the Land of Mordor where the Shadows lie.""",
         "num_generations_input": 1,
         "num_candidates_slider": 3,
         "max_attempts_slider": 3,
-        "bypass_whisper_checkbox": False,
-        "whisper_model_dropdown": "medium (~5–8 GB OpenAI / ~2.5–4.5 GB faster-whisper)",
+        "bypass_whisper_checkbox": True,
+        "whisper_model_dropdown": "small (~2–3 GB OpenAI / ~1.2–1.7 GB faster-whisper)",
         "use_faster_whisper_checkbox": True,
         "enable_parallel_checkbox": True,
         "use_longest_transcript_on_fail_checkbox": True,
@@ -279,7 +319,7 @@ In the Land of Mordor where the Shadows lie.""",
         "seed_input": 0,
         "enable_batching_checkbox": False,
         "smart_batch_short_sentences_checkbox": True,
-        "to_lowercase_checkbox": True,
+        "to_lowercase_checkbox": False,
         "normalize_spacing_checkbox": True,
         "fix_dot_letters_checkbox": True,
         "remove_reference_numbers_checkbox": True,
@@ -293,7 +333,10 @@ In the Land of Mordor where the Shadows lie.""",
         "normalize_tp_slider": -2,
         "normalize_lra_slider": 7,
         "sound_words_field": "",
-        "use_pyrnnoise_checkbox": False,
+        "use_pyrnnoise_checkbox": True,
+
+        # Output pacing (post-process time-stretch). 1.0 = original.
+        "speed_slider": 1.0,
     }
         
 settings = load_settings()        
@@ -735,6 +778,52 @@ def _apply_pyrnnoise_in_place(wav_output_path):
                 pass
 
 
+def _apply_speed_in_place(wav_output_path: str, speed: float) -> bool:
+    """Time-stretch a WAV in-place using ffmpeg's `atempo` filter.
+
+    `speed` > 1.0 speeds up; < 1.0 slows down.
+    """
+    try:
+        speed = float(speed)
+    except Exception:
+        return False
+
+    if speed == 1.0:
+        return True
+
+    # Keep within atempo's single-filter stable range.
+    if speed < 0.5 or speed > 2.0:
+        print(f"[SPEED] Requested speed {speed} out of supported range 0.5–2.0; skipping.")
+        return False
+
+    tmp = wav_output_path.replace(".wav", f"_speed{speed:.2f}.wav")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", wav_output_path,
+                "-filter:a", f"atempo={speed}",
+                tmp,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if os.path.exists(tmp) and os.path.getsize(tmp) > 1024:
+            os.replace(tmp, wav_output_path)
+            print(f"[SPEED] Applied atempo={speed} to: {wav_output_path}")
+            return True
+        return False
+    except Exception as e:
+        print(f"[SPEED] Speed change failed: {e}")
+        return False
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
 def get_wav_duration(path):
     try:
         return librosa.get_duration(filename=path)
@@ -1081,6 +1170,7 @@ def generate_batch_tts(
     normalize_level: float,
     normalize_tp: float,
     normalize_lra: float,
+    speed: float,
     num_candidates_per_chunk: int,
     max_attempts_per_candidate: int,
     bypass_whisper_checking: bool,
@@ -1096,6 +1186,11 @@ def generate_batch_tts(
 
     if not audio_prompt_path_input or (isinstance(audio_prompt_path_input, str) and not os.path.isfile(audio_prompt_path_input)):
         audio_prompt_path_input = None
+
+    # Multilingual: if user didn't provide a reference, fall back to the original multilingual demo's
+    # per-language default prompt. This avoids the "generic" built-in voice drifting toward English.
+    if tts_variant == "multilingual_23lang" and audio_prompt_path_input is None:
+        audio_prompt_path_input = _get_default_mtl_prompt_audio(language_id)
 
     # PATCH: Get file basename (to prepend) if a text file was uploaded
     # Support for multiple file uploads
@@ -1559,6 +1654,13 @@ def process_text_for_tts(
             except Exception as e:
                 print(f"[ERROR] ffmpeg normalization failed: {e}")
 
+        # --- SPEED (optional, after all cleanup/normalization) ---
+        try:
+            if speed is not None and float(speed) != 1.0:
+                _apply_speed_in_place(wav_output, float(speed))
+        except Exception as e:
+            print(f"[ERROR] Speed post-processing failed: {e}")
+
         gen_outputs = []
         for export_format in export_formats:
             if export_format.lower() == "wav":
@@ -1609,6 +1711,7 @@ def process_text_for_tts(
             "normalize_level_slider": normalize_level,
             "normalize_tp_slider": normalize_tp,
             "normalize_lra_slider": normalize_lra,
+            "speed_slider": speed,
             "num_candidates_slider": num_candidates_per_chunk,
             "max_attempts_slider": max_attempts_per_candidate,
             "bypass_whisper_checkbox": bypass_whisper_checking,
@@ -1662,7 +1765,7 @@ whisper_model_map = {
 def apply_settings_json(settings_json):
     import json
     if not settings_json:
-        return [gr.update() for _ in range(38)]
+        return [gr.update() for _ in range(39)]
     try:
         with open(settings_json.name, "r", encoding="utf-8") as f:
             loaded = json.load(f)
@@ -1706,7 +1809,7 @@ def apply_settings_json(settings_json):
         tv = loaded.get("tts_variant_dropdown", "extended_en")
         lang = loaded.get("language_id_dropdown", "en")
 
-        # --- CRITICAL: return values in EXACT outputs order (36) ---
+        # --- CRITICAL: return values in EXACT outputs order (39) ---
         return [
             loaded.get("text_input", ""),                              # 0
             None,                                                      # 1 text_file_input (cannot load)
@@ -1745,11 +1848,12 @@ def apply_settings_json(settings_json):
             _float(loaded.get("normalize_level_slider", -24), -24),    # 34
             _float(loaded.get("normalize_tp_slider", -2), -2),         # 35
             _float(loaded.get("normalize_lra_slider", 7), 7),          # 36
-            loaded.get("sound_words_field", ""),                       # 37
+            _float(loaded.get("speed_slider", 1.0), 1.0),              # 37
+            loaded.get("sound_words_field", ""),                       # 38
         ]
     except Exception as e:
         print(f"[ERROR] Failed to load settings JSON: {e}")
-        return [gr.update() for _ in range(38)]
+        return [gr.update() for _ in range(39)]
 
 
 
@@ -1854,6 +1958,14 @@ def main(server_name=None, server_port=None, share=False):
                             1, 50, value=settings["normalize_lra_slider"], step=1, label="EBU Loudness Range (LRA, ebu only)"
                         )
 
+                        speed_slider = gr.Slider(
+                            0.5, 2.0,
+                            value=settings.get("speed_slider", 1.0),
+                            step=0.01,
+                            label="Speech speed (post-process)",
+                            info="1.0 = original. <1 slows down, >1 speeds up."
+                        )
+
 
                         sound_words_field = gr.Textbox(
                             label="Remove/Replace Words/Sounds (newline separated or 'sound=>replacement')",
@@ -1903,7 +2015,8 @@ def main(server_name=None, server_port=None, share=False):
                                 normalize_level_slider,              # 34
                                 normalize_tp_slider,                 # 35
                                 normalize_lra_slider,                # 36
-                                sound_words_field,                   # 37
+                                speed_slider,                        # 37
+                                sound_words_field,                   # 38
                             ]
                         )
 
@@ -1943,6 +2056,7 @@ def main(server_name=None, server_port=None, share=False):
                     "normalize_level_slider",
                     "normalize_tp_slider",
                     "normalize_lra_slider",
+                    "speed_slider",
                     "num_candidates_slider",
                     "max_attempts_slider",
                     "bypass_whisper_checkbox",
@@ -1962,7 +2076,7 @@ def main(server_name=None, server_port=None, share=False):
              
             
 
-            _save_indices = [0, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
+            _save_indices = [0, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]
 
             run_button.click(
                 fn=lambda *args: (
@@ -1998,16 +2112,17 @@ def main(server_name=None, server_port=None, share=False):
                     normalize_level_slider,       # 25
                     normalize_tp_slider,          # 26
                     normalize_lra_slider,         # 27
-                    num_candidates_slider,        # 28
-                    max_attempts_slider,          # 29
-                    bypass_whisper_checkbox,      # 30
-                    whisper_model_dropdown,       # 31
-                    enable_parallel_checkbox,     # 32
-                    num_parallel_workers_slider,  # 33
-                    use_longest_transcript_on_fail_checkbox, # 34
-                    sound_words_field,            # 35
-                    use_faster_whisper_checkbox,  # 36
-                    separate_files_checkbox       # 37
+                    speed_slider,                 # 28
+                    num_candidates_slider,        # 29
+                    max_attempts_slider,          # 30
+                    bypass_whisper_checkbox,      # 31
+                    whisper_model_dropdown,       # 32
+                    enable_parallel_checkbox,     # 33
+                    num_parallel_workers_slider,  # 34
+                    use_longest_transcript_on_fail_checkbox, # 35
+                    sound_words_field,            # 36
+                    use_faster_whisper_checkbox,  # 37
+                    separate_files_checkbox       # 38
                 ],
                 outputs=[output_audio, audio_dropdown, audio_preview],
             )
