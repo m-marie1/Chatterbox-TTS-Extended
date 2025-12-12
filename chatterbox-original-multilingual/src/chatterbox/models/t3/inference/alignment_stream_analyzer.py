@@ -115,6 +115,22 @@ class AlignmentStreamAnalyzer:
             # subsequent chunks have 1 frame due to KV-caching
             A_chunk = aligned_attn[:, i:j].clone().cpu() # (1, S)
 
+        # If we couldn't extract anything useful, don't crash inference.
+        if A_chunk.numel() == 0 or A_chunk.shape[0] == 0 or A_chunk.shape[1] == 0:
+            return logits
+
+        # The analyzer object may be reused across generations; if the text length (S) changes,
+        # reset internal state so we don't try to concatenate mismatched widths.
+        if self.alignment.numel() != 0 and self.alignment.shape[1] != A_chunk.shape[1]:
+            self.alignment = torch.zeros(0, A_chunk.shape[1])
+            self.curr_frame_pos = 0
+            self.text_position = 0
+            self.started = False
+            self.started_at = None
+            self.complete = False
+            self.completed_at = None
+            self.generated_tokens = []
+
         # TODO: monotonic masking; could have issue b/c spaces are often skipped.
         A_chunk[:, self.curr_frame_pos + 1:] = 0
 

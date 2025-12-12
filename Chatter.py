@@ -29,6 +29,7 @@ import argparse
 import soundfile as sf
 import inspect, traceback
 from chatterbox.src.chatterbox.vc import ChatterboxVC
+import threading
 try:
     import pyrnnoise
     _PYRNNOISE_AVAILABLE = True
@@ -179,6 +180,10 @@ if MULTILINGUAL_SRC:
             sys.path.insert(0, str(cp))
 
 _refresh_chatterbox_pkg_path()
+
+# Multilingual generation uses shared internal state (alignment analyzer hooks) and is not thread-safe.
+# Even when the UI uses parallel chunk processing, we must serialize actual model.generate() calls.
+_MODEL_GENERATE_LOCK = threading.Lock()
 
 try:
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
@@ -1072,6 +1077,13 @@ def process_one_chunk_deterministic(
                 return _kwargs
         return {k: v for k, v in _kwargs.items() if k in _sig.parameters}
 
+    def _call_generate(_model, _kwargs: dict):
+        # Serialize multilingual generation to avoid cross-thread corruption.
+        if getattr(_model, "__class__", type("x", (), {})).__name__ == "ChatterboxMultilingualTTS":
+            with _MODEL_GENERATE_LOCK:
+                return _model.generate(**_kwargs)
+        return _model.generate(**_kwargs)
+
     candidates = []
     try:
         if not sentence_group.strip():
@@ -1116,7 +1128,7 @@ def process_one_chunk_deterministic(
                             language_id=language_id,
                         )
                         gen_kwargs = _filter_generate_kwargs(model, gen_kwargs)
-                        wav = model.generate(**gen_kwargs)
+                        wav = _call_generate(model, gen_kwargs)
                     else:
                         # Fallback: fork RNG state locally and seed inside the scope
                         with torch.random.fork_rng(devices=devices, enabled=True):
@@ -1133,7 +1145,7 @@ def process_one_chunk_deterministic(
                                 language_id=language_id,
                             )
                             gen_kwargs = _filter_generate_kwargs(model, gen_kwargs)
-                            wav = model.generate(**gen_kwargs)
+                            wav = _call_generate(model, gen_kwargs)
 
                     candidate_path = f"temp/gen{gen_index+1}_chunk_{idx:03d}_cand_{cand_idx+1}_try{retry_attempt_number}_seed{candidate_seed}.wav"
                     torchaudio.save(candidate_path, wav, model.sr)
@@ -1282,7 +1294,7 @@ def generate_batch_tts(
                     to_lowercase, normalize_spacing, fix_dot_letters, remove_reference_numbers, keep_original_wav,
                     smart_batch_short_sentences, disable_watermark, num_generations,
                     normalize_audio, normalize_method, normalize_level, normalize_tp,
-                    normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
+                    normalize_lra, speed, num_candidates_per_chunk, max_attempts_per_candidate,
                     bypass_whisper_checking, whisper_model_name, enable_parallel,
                     num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
                 )
@@ -1314,7 +1326,7 @@ def generate_batch_tts(
             to_lowercase, normalize_spacing, fix_dot_letters, remove_reference_numbers, keep_original_wav,
             smart_batch_short_sentences, disable_watermark, num_generations,
             normalize_audio, normalize_method, normalize_level, normalize_tp,
-            normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
+            normalize_lra, speed, num_candidates_per_chunk, max_attempts_per_candidate,
             bypass_whisper_checking, whisper_model_name, enable_parallel,
             num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
         )
@@ -1364,6 +1376,7 @@ def process_text_for_tts(
     normalize_level,
     normalize_tp,
     normalize_lra,
+    speed,
     num_candidates_per_chunk,
     max_attempts_per_candidate,
     bypass_whisper_checking,
