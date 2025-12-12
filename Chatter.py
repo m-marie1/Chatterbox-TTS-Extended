@@ -1404,8 +1404,14 @@ def process_text_for_tts(
 
     os.makedirs("temp", exist_ok=True)
     os.makedirs("output", exist_ok=True)
+    # Clear only temp *files*; keep subdirectories (e.g. cached `temp/mtl_prompts`).
     for f in os.listdir("temp"):
-        os.remove(os.path.join("temp", f))
+        p = os.path.join("temp", f)
+        try:
+            if os.path.isfile(p) or os.path.islink(p):
+                os.remove(p)
+        except Exception as e:
+            print(f"[WARNING] Could not remove temp entry {p!r}: {e}")
 
     sentences = split_into_sentences(text)
     print(f"\033[32m[DEBUG] Split text into {len(sentences)} sentences.\033[0m")
