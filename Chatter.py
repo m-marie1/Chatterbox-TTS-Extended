@@ -1342,7 +1342,7 @@ def generate_batch_tts(
             to_lowercase, normalize_spacing, fix_dot_letters, remove_reference_numbers, keep_original_wav,
             smart_batch_short_sentences, disable_watermark, num_generations,
             normalize_audio, normalize_method, normalize_level, normalize_tp,
-            normalize_lra, num_candidates_per_chunk, max_attempts_per_candidate,
+            normalize_lra, speed, num_candidates_per_chunk, max_attempts_per_candidate,
             bypass_whisper_checking, whisper_model_name, enable_parallel,
             num_parallel_workers, use_longest_transcript_on_fail, sound_words_field, use_faster_whisper
         )
@@ -1399,7 +1399,9 @@ def process_text_for_tts(
         raise ValueError("No text provided.")
     
     # ---- NEW: Apply sound word removals/replacements ----
-    if sound_words_field and sound_words_field.strip():
+    # Gradio can sometimes pass unexpected types (e.g., bool) if inputs are mis-wired.
+    sound_words_field = "" if sound_words_field is None else str(sound_words_field)
+    if sound_words_field.strip():
         sound_words = parse_sound_word_field(sound_words_field)
         if sound_words:
             text = smart_remove_sound_words(text, sound_words)
