@@ -2277,6 +2277,16 @@ Or use the same voice for all:
                             type="filepath", 
                             label="Default Voice (used when segment voice is null)"
                         )
+                        batch_anna_voice_input = gr.Audio(
+                            sources=["upload"],
+                            type="filepath",
+                            label="Anna Reference Voice (optional)"
+                        )
+                        batch_max_voice_input = gr.Audio(
+                            sources=["upload"],
+                            type="filepath",
+                            label="Max Reference Voice (optional)"
+                        )
                         batch_voice_map_input = gr.Textbox(
                             label="Voice Map (JSON) - map names to audio files",
                             lines=3,
@@ -2285,8 +2295,8 @@ Or use the same voice for all:
                     with gr.Column():
                         batch_speed_slider = gr.Slider(0.7, 1.3, value=0.95, step=0.05, label="Speech Speed (0.95 = slightly slower)")
                         batch_exaggeration_slider = gr.Slider(0.0, 1.0, value=0.5, step=0.1, label="Emotion Exaggeration")
-                        batch_cfg_slider = gr.Slider(0.2, 1.0, value=0.5, step=0.05, label="CFG Weight (lower = more expressive)")
-                        batch_temp_slider = gr.Slider(0.5, 1.2, value=0.8, step=0.05, label="Temperature (higher = more variation)")
+                        batch_cfg_slider = gr.Slider(0.2, 1.0, value=0.3, step=0.05, label="CFG Weight (lower = more expressive)")
+                        batch_temp_slider = gr.Slider(0.5, 1.2, value=0.9, step=0.05, label="Temperature (higher = more variation)")
                         batch_language_dropdown = gr.Dropdown(
                             choices=sorted(SUPPORTED_LANGUAGES.keys()) if SUPPORTED_LANGUAGES else ["en", "de"],
                             value="de",
@@ -2300,7 +2310,7 @@ Or use the same voice for all:
                 batch_output_json = gr.Textbox(label="Results (JSON)", lines=5)
                 
                 def process_batch_tts(
-                    batch_json, default_voice, voice_map_json,
+                    batch_json, default_voice, anna_voice, max_voice, voice_map_json,
                     speed, exaggeration, cfg_weight, temperature, language,
                     use_denoise, use_normalize
                 ):
@@ -2319,6 +2329,14 @@ Or use the same voice for all:
                             voice_map = _json.loads(voice_map_json)
                         except:
                             pass
+
+                    # If caller didn't provide a voice_map, allow direct Anna/Max uploads.
+                    # In batch_json, a segment's `voice` can be "anna" or "max" and it will use these.
+                    if not voice_map:
+                        if anna_voice and os.path.exists(str(anna_voice)):
+                            voice_map["anna"] = anna_voice
+                        if max_voice and os.path.exists(str(max_voice)):
+                            voice_map["max"] = max_voice
                     
                     # Normalize input format
                     segments = []
@@ -2427,12 +2445,13 @@ Or use the same voice for all:
                 batch_run_btn.click(
                     fn=process_batch_tts,
                     inputs=[
-                        batch_json_input, batch_voice_input, batch_voice_map_input,
+                        batch_json_input, batch_voice_input, batch_anna_voice_input, batch_max_voice_input, batch_voice_map_input,
                         batch_speed_slider, batch_exaggeration_slider, batch_cfg_slider,
                         batch_temp_slider, batch_language_dropdown,
                         batch_denoise_checkbox, batch_normalize_checkbox
                     ],
                     outputs=[batch_output_files, batch_output_json],
+                    api_name="/process_batch_tts",
                 )
 
         with gr.Accordion("Show Help / Instructions", open=False):
