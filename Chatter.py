@@ -30,11 +30,18 @@ import soundfile as sf
 import inspect, traceback
 from chatterbox.src.chatterbox.vc import ChatterboxVC
 import threading
-try:
-    import pyrnnoise
-    _PYRNNOISE_AVAILABLE = True
-except Exception:
-    _PYRNNOISE_AVAILABLE = False
+_PYRNNOISE_AVAILABLE = False
+def _try_import_pyrnnoise():
+    """Lazy import pyrnnoise - allows installation after module load."""
+    global _PYRNNOISE_AVAILABLE
+    if _PYRNNOISE_AVAILABLE:
+        return True
+    try:
+        import pyrnnoise
+        _PYRNNOISE_AVAILABLE = True
+        return True
+    except Exception:
+        return False
 
 # --- Multilingual model path + import ---
 _HERE = Path(__file__).resolve().parent
@@ -758,6 +765,9 @@ def _run_pyrnnoise(input_wav, output_wav):
     """
     Try the pyrnnoise CLI ('denoise') first; if missing or fails, fall back to Python API.
     """
+    # Lazy import - try to import now in case it was installed after module load
+    _try_import_pyrnnoise()
+    
     if not _PYRNNOISE_AVAILABLE:
         print("[DENOISE] pyrnnoise not available; skipping.")
         return False
@@ -2234,6 +2244,195 @@ def main(server_name=None, server_port=None, share=False):
                     fn=_vc_wrapper,
                     inputs=[vc_input_audio, vc_target_audio, disable_watermark_checkbox, vc_pitch_shift],
                     outputs=[vc_output_files, vc_output_audio],
+                )
+
+            # === BATCH TTS TAB: Process multiple texts efficiently ===
+            with gr.Tab("Batch TTS (API)"):
+                gr.Markdown("""## Batch TTS Processing
+                
+Process multiple text segments in a single request - ideal for podcasts, audiobooks, etc.
+
+**Input Format (JSON):**
+```json
+[
+  {"text": "Hello!", "voice": "path/to/voice1.wav"},
+  {"text": "How are you?", "voice": "path/to/voice2.wav"}
+]
+```
+
+Or use the same voice for all:
+```json
+{"texts": ["Hello!", "How are you?"], "voice": "path/to/voice.wav"}
+```
+""")
+                with gr.Row():
+                    with gr.Column():
+                        batch_json_input = gr.Textbox(
+                            label="Batch Input (JSON)", 
+                            lines=10,
+                            placeholder='[{"text": "Hallo!", "voice": null}, {"text": "Wie geht es?", "voice": null}]'
+                        )
+                        batch_voice_input = gr.Audio(
+                            sources=["upload"], 
+                            type="filepath", 
+                            label="Default Voice (used when segment voice is null)"
+                        )
+                        batch_voice_map_input = gr.Textbox(
+                            label="Voice Map (JSON) - map names to audio files",
+                            lines=3,
+                            placeholder='{"anna": "/path/to/anna.wav", "max": "/path/to/max.wav"}'
+                        )
+                    with gr.Column():
+                        batch_speed_slider = gr.Slider(0.7, 1.3, value=0.95, step=0.05, label="Speech Speed (0.95 = slightly slower)")
+                        batch_exaggeration_slider = gr.Slider(0.0, 1.0, value=0.5, step=0.1, label="Emotion Exaggeration")
+                        batch_cfg_slider = gr.Slider(0.2, 1.0, value=0.5, step=0.05, label="CFG Weight (lower = more expressive)")
+                        batch_temp_slider = gr.Slider(0.5, 1.2, value=0.8, step=0.05, label="Temperature (higher = more variation)")
+                        batch_language_dropdown = gr.Dropdown(
+                            choices=sorted(SUPPORTED_LANGUAGES.keys()) if SUPPORTED_LANGUAGES else ["en", "de"],
+                            value="de",
+                            label="Language"
+                        )
+                        batch_denoise_checkbox = gr.Checkbox(label="Denoise with pyrnnoise", value=True)
+                        batch_normalize_checkbox = gr.Checkbox(label="Normalize audio", value=True)
+                
+                batch_run_btn = gr.Button("Process Batch", variant="primary")
+                batch_output_files = gr.Files(label="Generated Audio Files")
+                batch_output_json = gr.Textbox(label="Results (JSON)", lines=5)
+                
+                def process_batch_tts(
+                    batch_json, default_voice, voice_map_json,
+                    speed, exaggeration, cfg_weight, temperature, language,
+                    use_denoise, use_normalize
+                ):
+                    """Process multiple TTS segments in one request."""
+                    import json as _json
+                    
+                    # Parse inputs
+                    try:
+                        batch_data = _json.loads(batch_json) if batch_json else []
+                    except Exception as e:
+                        raise gr.Error(f"Invalid JSON input: {e}")
+                    
+                    voice_map = {}
+                    if voice_map_json:
+                        try:
+                            voice_map = _json.loads(voice_map_json)
+                        except:
+                            pass
+                    
+                    # Normalize input format
+                    segments = []
+                    if isinstance(batch_data, dict) and "texts" in batch_data:
+                        # Format: {"texts": [...], "voice": "..."}
+                        voice = batch_data.get("voice") or default_voice
+                        for text in batch_data["texts"]:
+                            segments.append({"text": text, "voice": voice})
+                    elif isinstance(batch_data, list):
+                        segments = batch_data
+                    else:
+                        raise gr.Error("Invalid batch format")
+                    
+                    if not segments:
+                        raise gr.Error("No segments to process")
+                    
+                    # Load model once
+                    model = get_or_load_multilingual_model() if language != "en" else get_or_load_model()
+                    
+                    output_files = []
+                    results = []
+                    os.makedirs("output/batch", exist_ok=True)
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    
+                    for idx, seg in enumerate(segments):
+                        text = seg.get("text", "").strip()
+                        if not text:
+                            results.append({"index": idx, "status": "skipped", "reason": "empty text"})
+                            continue
+                        
+                        # Resolve voice
+                        voice_ref = seg.get("voice")
+                        if voice_ref and voice_ref in voice_map:
+                            voice_ref = voice_map[voice_ref]
+                        if not voice_ref or not os.path.exists(str(voice_ref)):
+                            voice_ref = default_voice
+                        
+                        try:
+                            # Generate audio
+                            set_seed(random.randint(1, 2**32 - 1))
+                            
+                            gen_kwargs = dict(
+                                text=text,
+                                audio_prompt_path=voice_ref,
+                                exaggeration=exaggeration,
+                                temperature=temperature,
+                                cfg_weight=cfg_weight,
+                                apply_watermark=False,
+                            )
+                            
+                            if language != "en":
+                                gen_kwargs["language_id"] = language
+                            
+                            wav = model.generate(**gen_kwargs)
+                            
+                            # Save
+                            out_path = f"output/batch/seg_{timestamp}_{idx:04d}.wav"
+                            torchaudio.save(out_path, wav, model.sr)
+                            
+                            # Post-process: denoise
+                            if use_denoise:
+                                _try_import_pyrnnoise()
+                                if _PYRNNOISE_AVAILABLE:
+                                    try:
+                                        _apply_pyrnnoise_in_place(out_path)
+                                    except:
+                                        pass
+                            
+                            # Post-process: speed
+                            if speed != 1.0:
+                                _apply_speed_in_place(out_path, speed)
+                            
+                            # Post-process: normalize
+                            if use_normalize:
+                                try:
+                                    norm_temp = out_path.replace(".wav", "_norm.wav")
+                                    normalize_with_ffmpeg(out_path, norm_temp, method="ebu", i=-20, tp=-2, lra=7)
+                                except:
+                                    pass
+                            
+                            # Convert to MP3
+                            mp3_path = out_path.replace(".wav", ".mp3")
+                            audio = AudioSegment.from_wav(out_path)
+                            audio.export(mp3_path, format="mp3", bitrate="192k")
+                            
+                            duration = len(audio) / 1000.0
+                            output_files.append(mp3_path)
+                            results.append({
+                                "index": idx,
+                                "status": "success",
+                                "path": mp3_path,
+                                "duration_s": round(duration, 2)
+                            })
+                            
+                            # Clean up wav
+                            try:
+                                os.remove(out_path)
+                            except:
+                                pass
+                                
+                        except Exception as e:
+                            results.append({"index": idx, "status": "error", "error": str(e)})
+                    
+                    return output_files, _json.dumps(results, indent=2)
+                
+                batch_run_btn.click(
+                    fn=process_batch_tts,
+                    inputs=[
+                        batch_json_input, batch_voice_input, batch_voice_map_input,
+                        batch_speed_slider, batch_exaggeration_slider, batch_cfg_slider,
+                        batch_temp_slider, batch_language_dropdown,
+                        batch_denoise_checkbox, batch_normalize_checkbox
+                    ],
+                    outputs=[batch_output_files, batch_output_json],
                 )
 
         with gr.Accordion("Show Help / Instructions", open=False):
