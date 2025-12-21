@@ -31,17 +31,38 @@ import inspect, traceback
 from chatterbox.src.chatterbox.vc import ChatterboxVC
 import threading
 _PYRNNOISE_AVAILABLE = False
+_PYRNNOISE_TRIED_INSTALL = False
+
+
 def _try_import_pyrnnoise():
-    """Lazy import pyrnnoise - allows installation after module load."""
-    global _PYRNNOISE_AVAILABLE
+    """
+    Lazy import pyrnnoise. If missing, optionally attempt a one-time pip install
+    (controlled by CHATTERBOX_AUTO_INSTALL_PYRNNOISE=1, default on).
+    """
+    global _PYRNNOISE_AVAILABLE, _PYRNNOISE_TRIED_INSTALL
     if _PYRNNOISE_AVAILABLE:
         return True
     try:
-        import pyrnnoise
+        import pyrnnoise  # noqa: F401
         _PYRNNOISE_AVAILABLE = True
         return True
     except Exception:
-        return False
+        pass
+
+    # Auto-install once if allowed
+    if not _PYRNNOISE_TRIED_INSTALL and os.environ.get("CHATTERBOX_AUTO_INSTALL_PYRNNOISE", "1") == "1":
+        _PYRNNOISE_TRIED_INSTALL = True
+        try:
+            import subprocess, sys as _sys, importlib
+            subprocess.run([_sys.executable, "-m", "pip", "install", "pyrnnoise"], check=True)
+            importlib.invalidate_caches()
+            import pyrnnoise  # noqa: F401
+            _PYRNNOISE_AVAILABLE = True
+            return True
+        except Exception:
+            return False
+
+    return False
 
 # --- Multilingual model path + import ---
 _HERE = Path(__file__).resolve().parent
@@ -377,10 +398,10 @@ In the Land of Mordor where the Shadows lie.""",
         "enable_batching_checkbox": False,
         "smart_batch_short_sentences_checkbox": True,
         "to_lowercase_checkbox": False,
-        "normalize_spacing_checkbox": True,
-        "fix_dot_letters_checkbox": True,
-        "remove_reference_numbers_checkbox": True,
-        "use_auto_editor_checkbox": False,
+        "normalize_spacing_checkbox": False,
+        "fix_dot_letters_checkbox": False,
+        "remove_reference_numbers_checkbox": False,
+        "use_auto_editor_checkbox": True,
         "keep_original_checkbox": False,
         "threshold_slider": 0.06,
         "margin_slider": 0.2,
