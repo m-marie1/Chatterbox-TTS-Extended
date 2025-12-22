@@ -1703,6 +1703,7 @@ def process_text_for_tts(
 
         # --- DENOISE (optional, before Auto-Editor) ---
         if use_pyrnnoise:
+            _try_import_pyrnnoise()
             if _PYRNNOISE_AVAILABLE:
                 try:
                     if _apply_pyrnnoise_in_place(wav_output):
