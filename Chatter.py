@@ -194,6 +194,92 @@ except Exception as e:  # Defer failures until user selects multilingual
     SUPPORTED_LANGUAGES = {}
     _MTL_IMPORT_ERROR = e
 
+_AUTO_LANGUAGE_MODE_TOKENS = {
+    "auto",
+    "detect",
+    "infer",
+    "inferred",
+    "mixed",
+    "multi",
+    "multilingual",
+    "auto-mixed",
+    "auto_mixed",
+}
+
+_LANGUAGE_NAME_ALIASES = {
+    "arabic": "ar",
+    "danish": "da",
+    "german": "de",
+    "greek": "el",
+    "english": "en",
+    "spanish": "es",
+    "finnish": "fi",
+    "french": "fr",
+    "hebrew": "he",
+    "hindi": "hi",
+    "italian": "it",
+    "japanese": "ja",
+    "korean": "ko",
+    "malay": "ms",
+    "dutch": "nl",
+    "norwegian": "no",
+    "polish": "pl",
+    "portuguese": "pt",
+    "russian": "ru",
+    "swedish": "sv",
+    "swahili": "sw",
+    "turkish": "tr",
+    "chinese": "zh",
+}
+
+_LANGUAGE_SCRIPT_PATTERNS = {
+    "ja": re.compile(r"[\u3040-\u30ff]"),          # Hiragana + Katakana
+    "ko": re.compile(r"[\uac00-\ud7af]"),          # Hangul
+    "zh": re.compile(r"[\u4e00-\u9fff]"),          # CJK Unified Ideographs
+    "ar": re.compile(r"[\u0600-\u06ff]"),          # Arabic
+    "he": re.compile(r"[\u0590-\u05ff]"),          # Hebrew
+    "hi": re.compile(r"[\u0900-\u097f]"),          # Devanagari
+    "ru": re.compile(r"[\u0400-\u04ff]"),          # Cyrillic
+    "el": re.compile(r"[\u0370-\u03ff]"),          # Greek
+}
+
+_LANGUAGE_KEYWORDS = {
+    "en": {"the", "and", "is", "are", "to", "of", "in", "for", "with", "this", "that", "you", "it"},
+    "es": {"el", "la", "los", "las", "de", "que", "en", "y", "por", "para", "con", "una", "un", "es"},
+    "fr": {"le", "la", "les", "de", "des", "et", "est", "dans", "pour", "avec", "une", "un", "que"},
+    "de": {"der", "die", "das", "und", "ist", "mit", "ein", "eine", "ich", "nicht", "zu", "den"},
+    "it": {"il", "lo", "la", "gli", "le", "di", "e", "che", "per", "con", "una", "un", "non"},
+    "pt": {"o", "a", "os", "as", "de", "do", "da", "e", "que", "para", "com", "uma", "um"},
+    "nl": {"de", "het", "een", "en", "van", "voor", "met", "niet", "dat", "is", "op"},
+    "da": {"og", "det", "at", "er", "en", "til", "for", "med", "ikke", "som", "den"},
+    "no": {"og", "det", "er", "en", "til", "for", "med", "ikke", "som", "på", "den"},
+    "sv": {"och", "det", "att", "är", "en", "för", "med", "inte", "som", "den", "på"},
+    "fi": {"ja", "on", "että", "se", "ei", "kun", "ole", "minä", "sinä", "tämä", "mitä"},
+    "pl": {"i", "to", "jest", "na", "w", "nie", "się", "z", "że", "do", "jak"},
+    "tr": {"ve", "bir", "bu", "için", "ile", "de", "da", "mi", "ben", "sen", "çok"},
+    "sw": {"na", "ya", "kwa", "ni", "katika", "hii", "hiyo", "sana", "wa", "za", "si"},
+    "ms": {"dan", "yang", "untuk", "dengan", "ini", "itu", "saya", "anda", "tidak", "pada", "ke"},
+}
+
+_LANGUAGE_CHAR_HINTS = {
+    "es": set("¡¿ñáéíóú"),
+    "fr": set("àâæçéèêëîïôœùûüÿ"),
+    "de": set("äöüß"),
+    "it": set("àèéìíîòóù"),
+    "pt": set("ãõáàâêéíóôúç"),
+    "tr": set("çğıöşü"),
+    "pl": set("ąćęłńóśźż"),
+    "sv": set("åäö"),
+    "da": set("æøå"),
+    "no": set("æøå"),
+    "fi": set("äö"),
+    "nl": set("ĳ"),
+}
+
+_INLINE_LANGUAGE_TAG_PATTERN = re.compile(
+    r"\[(/)?\s*([A-Za-z][A-Za-z0-9_\-]{0,20}(?:\s*=\s*[A-Za-z][A-Za-z0-9_\-]{0,20})?)\s*\]"
+)
+
 
 SETTINGS_PATH = "settings.json"
 #THIS IS THE START
@@ -589,8 +675,315 @@ def remove_inline_reference_numbers(text):
 
 
 def split_into_sentences(text):
-    # NLTK's Punkt tokenizer handles abbreviations and common English quirks
-    return sent_tokenize(text)
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    try:
+        sentences = [s.strip() for s in sent_tokenize(text) if s and s.strip()]
+    except Exception:
+        sentences = []
+
+    # If Punkt returns one giant block, use a multilingual punctuation fallback splitter.
+    if len(sentences) <= 1:
+        fallback = re.split(r'(?<=[.!?。！？])\s+|[\r\n]+', text)
+        fallback = [s.strip() for s in fallback if s and s.strip()]
+        if len(fallback) > len(sentences):
+            return fallback
+
+    return sentences if sentences else [text]
+
+
+def _normalize_language_id(language_id: str | None) -> str:
+    if language_id is None:
+        return ""
+    raw = str(language_id).strip().lower()
+    if not raw:
+        return ""
+    if raw in _AUTO_LANGUAGE_MODE_TOKENS:
+        return "auto"
+    if raw in SUPPORTED_LANGUAGES:
+        return raw
+    if raw in _LANGUAGE_NAME_ALIASES:
+        return _LANGUAGE_NAME_ALIASES[raw]
+    if raw in {"zh-cn", "zh-tw", "zh-hans", "zh-hant"}:
+        return "zh"
+    if "-" in raw:
+        lead = raw.split("-", 1)[0]
+        if lead in SUPPORTED_LANGUAGES:
+            return lead
+    if "_" in raw:
+        lead = raw.split("_", 1)[0]
+        if lead in SUPPORTED_LANGUAGES:
+            return lead
+    return raw
+
+
+def _is_auto_language_mode(language_id: str | None) -> bool:
+    return _normalize_language_id(language_id) == "auto"
+
+
+def _parse_inline_lang_token(raw_token: str):
+    token = (raw_token or "").strip().lower().replace(" ", "")
+    if not token:
+        return ("", "code")
+    if token.startswith("lang="):
+        return (_normalize_language_id(token.split("=", 1)[1]), "lang")
+    if token.startswith("language="):
+        return (_normalize_language_id(token.split("=", 1)[1]), "lang")
+    return (_normalize_language_id(token), "code")
+
+
+def split_inline_language_spans(text: str):
+    """
+    Parse inline language tags and return spans preserving order.
+    Supported forms:
+    - [de] ... [/de]
+    - [lang=de] ... [/lang]
+    """
+    source = text or ""
+    spans = []
+    stack = []
+    cursor = 0
+    has_tags = False
+
+    def _active_language():
+        return stack[-1]["lang"] if stack else None
+
+    for match in _INLINE_LANGUAGE_TAG_PATTERN.finditer(source):
+        start, end = match.span()
+        if start > cursor:
+            spans.append({"text": source[cursor:start], "language_id": _active_language()})
+
+        is_closing = bool(match.group(1))
+        token_body = match.group(2) or ""
+        parsed_lang, opener_kind = _parse_inline_lang_token(token_body)
+
+        if not is_closing:
+            if parsed_lang in SUPPORTED_LANGUAGES:
+                stack.append({"lang": parsed_lang, "kind": opener_kind})
+                has_tags = True
+            else:
+                # Keep unknown tag text verbatim so user input is not silently dropped.
+                spans.append({"text": source[start:end], "language_id": _active_language()})
+        else:
+            close_norm = (token_body or "").strip().lower().replace(" ", "")
+            closed = False
+            if close_norm in {"lang", "language"}:
+                for i in range(len(stack) - 1, -1, -1):
+                    if stack[i]["kind"] == "lang":
+                        stack = stack[:i]
+                        closed = True
+                        has_tags = True
+                        break
+            else:
+                close_lang = _normalize_language_id(close_norm)
+                if close_lang in SUPPORTED_LANGUAGES:
+                    for i in range(len(stack) - 1, -1, -1):
+                        if stack[i]["lang"] == close_lang:
+                            stack = stack[:i]
+                            closed = True
+                            has_tags = True
+                            break
+            if not closed:
+                # Keep unmatched closing tags verbatim.
+                spans.append({"text": source[start:end], "language_id": _active_language()})
+
+        cursor = end
+
+    if cursor < len(source):
+        spans.append({"text": source[cursor:], "language_id": _active_language()})
+
+    compact = []
+    for span in spans:
+        txt = span.get("text", "")
+        if txt:
+            compact.append({"text": txt, "language_id": span.get("language_id")})
+    return compact, has_tags
+
+
+def contains_inline_language_tags(text: str) -> bool:
+    _, has_tags = split_inline_language_spans(text)
+    return has_tags
+
+
+def strip_inline_language_tags(text: str) -> str:
+    spans, _ = split_inline_language_spans(text)
+    return "".join(span["text"] for span in spans)
+
+
+def _score_script_languages(text: str):
+    scores = {}
+    for lang, pattern in _LANGUAGE_SCRIPT_PATTERNS.items():
+        count = len(pattern.findall(text))
+        if count > 0:
+            scores[lang] = float(count) * 4.0
+    # Japanese normally contains Kanji too; if kana exists, bias toward ja.
+    if "ja" in scores and "zh" in scores:
+        scores["ja"] += 6.0
+    return scores
+
+
+def detect_text_language(text: str, fallback_language: str = "en") -> str:
+    """
+    Lightweight language inference for multilingual TTS routing.
+    Prioritizes script-based detection, then keyword/character hints for Latin-script languages.
+    """
+    normalized_fallback = _normalize_language_id(fallback_language) or "en"
+    if normalized_fallback not in SUPPORTED_LANGUAGES:
+        normalized_fallback = "en" if "en" in SUPPORTED_LANGUAGES else next(iter(SUPPORTED_LANGUAGES), "en")
+
+    text = (text or "").strip()
+    if not text:
+        return normalized_fallback
+
+    scores = _score_script_languages(text)
+    lowered = text.lower()
+
+    # Character-level hints (diacritics and language-specific punctuation).
+    if "¿" in text or "¡" in text:
+        scores["es"] = scores.get("es", 0.0) + 3.0
+    for lang, chars in _LANGUAGE_CHAR_HINTS.items():
+        hit_count = sum(1 for ch in lowered if ch in chars)
+        if hit_count:
+            scores[lang] = scores.get(lang, 0.0) + (1.5 * hit_count)
+
+    # Word-level keyword votes for Latin-script languages.
+    tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", lowered)
+    if tokens:
+        for token in tokens:
+            for lang, vocab in _LANGUAGE_KEYWORDS.items():
+                if token in vocab:
+                    scores[lang] = scores.get(lang, 0.0) + 2.0
+
+    # Keep only languages the model supports.
+    scores = {k: v for k, v in scores.items() if k in SUPPORTED_LANGUAGES}
+    if not scores:
+        return normalized_fallback
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_lang, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+
+    # Avoid over-committing on weak/tied evidence.
+    if best_score < 2.0:
+        return normalized_fallback
+    if (best_score - second_score) < 1.0 and best_score < 5.0:
+        return normalized_fallback
+    return best_lang
+
+
+def enforce_min_chunk_length(chunks, min_len=20, max_len=300):
+    out = []
+    i = 0
+    while i < len(chunks):
+        current = chunks[i].strip()
+        if len(current) >= min_len or i == len(chunks) - 1:
+            out.append(current)
+            i += 1
+        else:
+            # Try to merge with the next chunk if possible
+            if i + 1 < len(chunks):
+                merged = current + " " + chunks[i + 1]
+                if len(merged) <= max_len:
+                    out.append(merged)
+                    i += 2
+                else:
+                    out.append(current)
+                    i += 1
+            else:
+                out.append(current)
+                i += 1
+    return out
+
+
+def build_sentence_groups(sentences, enable_batching, smart_batch_short_sentences, max_chars=300):
+    clean_sentences = [s.strip() for s in sentences if s and s.strip()]
+    if not clean_sentences:
+        return []
+    if enable_batching:
+        grouped = group_sentences(clean_sentences, max_chars=max_chars)
+        if smart_batch_short_sentences:
+            grouped = enforce_min_chunk_length(grouped, max_len=max_chars)
+        return grouped
+    if smart_batch_short_sentences:
+        grouped = smart_append_short_sentences(clean_sentences, max_chars=max_chars)
+        return enforce_min_chunk_length(grouped, max_len=max_chars)
+    return clean_sentences
+
+
+def build_chunk_plan(sentences, enable_batching, smart_batch_short_sentences, default_language=None, auto_detect=False):
+    """
+    Returns a list of chunks: [{"text": str, "language_id": str|None}, ...]
+    """
+    default_lang = _normalize_language_id(default_language)
+    if not auto_detect:
+        return [
+            {"text": chunk, "language_id": default_lang or None, "validation_text": chunk}
+            for chunk in build_sentence_groups(sentences, enable_batching, smart_batch_short_sentences, max_chars=300)
+        ]
+
+    plan = []
+    run_sentences = []
+    run_lang = None
+    for sentence in [s for s in sentences if s and s.strip()]:
+        detected = detect_text_language(sentence, fallback_language=default_lang or "en")
+        if run_lang is None or detected == run_lang:
+            run_sentences.append(sentence)
+            run_lang = detected if run_lang is None else run_lang
+            continue
+
+        for chunk in build_sentence_groups(run_sentences, enable_batching, smart_batch_short_sentences, max_chars=300):
+            plan.append({"text": chunk, "language_id": run_lang, "validation_text": chunk})
+        run_sentences = [sentence]
+        run_lang = detected
+
+    if run_sentences:
+        for chunk in build_sentence_groups(run_sentences, enable_batching, smart_batch_short_sentences, max_chars=300):
+            plan.append({"text": chunk, "language_id": run_lang or default_lang or "en", "validation_text": chunk})
+
+    return plan
+
+
+def build_inline_tag_chunk_plan(
+    text: str,
+    default_language: str | None = None,
+    auto_detect_untagged: bool = False,
+):
+    """
+    Build a no-merge plan from inline tags. Every parsed span becomes its own unit.
+    """
+    spans, has_tags = split_inline_language_spans(text)
+    if not has_tags:
+        return []
+
+    default_lang = _normalize_language_id(default_language)
+    if default_lang not in SUPPORTED_LANGUAGES:
+        default_lang = "en" if "en" in SUPPORTED_LANGUAGES else next(iter(SUPPORTED_LANGUAGES), "en")
+
+    plan = []
+    for span in spans:
+        raw = span.get("text", "")
+        if not raw or not raw.strip():
+            continue
+
+        span_lang = span.get("language_id")
+        if span_lang not in SUPPORTED_LANGUAGES:
+            if auto_detect_untagged:
+                span_lang = detect_text_language(raw, fallback_language=default_lang)
+            else:
+                span_lang = default_lang
+
+        clean_text = raw.strip()
+        plan.append(
+            {
+                "text": clean_text,
+                "language_id": span_lang,
+                "validation_text": clean_text,
+            }
+        )
+
+    return plan
 
 def split_long_sentence(sentence, max_len=300, seps=None):
     """
@@ -986,16 +1379,121 @@ def whisper_check_mp(candidate_path, target_text, whisper_model, use_faster_whis
         print(f"[ERROR] Whisper transcription failed for {candidate_path}: {e}")
         sys.stdout.flush()
         return (candidate_path, 0.0, f"ERROR: {e}")
-        
-        
+
+
+def _is_multilingual_model_instance(model) -> bool:
+    return getattr(model, "__class__", type("x", (), {})).__name__ == "ChatterboxMultilingualTTS"
+
+
+def _tokenize_inline_tagged_multilingual_text(model, tagged_text: str, fallback_language: str = "en"):
+    spans, has_tags = split_inline_language_spans(tagged_text)
+    if not has_tags:
+        return None
+
+    fallback_lang = _normalize_language_id(fallback_language)
+    if fallback_lang not in SUPPORTED_LANGUAGES:
+        fallback_lang = "en" if "en" in SUPPORTED_LANGUAGES else next(iter(SUPPORTED_LANGUAGES), "en")
+
+    token_ids = []
+    for span in spans:
+        span_text = span.get("text", "")
+        if not span_text:
+            continue
+
+        span_lang = _normalize_language_id(span.get("language_id"))
+        if span_lang not in SUPPORTED_LANGUAGES:
+            # Keep untagged segments in a stable fallback language.
+            span_lang = fallback_lang
+
+        token_ids.extend(model.tokenizer.encode(span_text, language_id=span_lang))
+
+    if not token_ids:
+        return None
+    return torch.IntTensor(token_ids).unsqueeze(0).to(model.device)
+
+
+def _generate_mtl_single_pass_inline_tags(
+    model,
+    text: str,
+    audio_prompt_path,
+    exaggeration: float,
+    temperature: float,
+    cfg_weight: float,
+    apply_watermark: bool,
+    fallback_language: str = "en",
+):
+    # Import lazily to avoid hard-coupling import order between split chatterbox packages.
+    try:
+        from chatterbox.models.s3tokenizer import drop_invalid_tokens as _drop_invalid_tokens
+    except Exception:
+        from chatterbox.src.chatterbox.models.s3tokenizer import drop_invalid_tokens as _drop_invalid_tokens
+
+    text_tokens = _tokenize_inline_tagged_multilingual_text(
+        model=model,
+        tagged_text=text,
+        fallback_language=fallback_language,
+    )
+    if text_tokens is None:
+        raise ValueError("Inline tagged generation requested, but no valid tags were parsed.")
+
+    if audio_prompt_path:
+        model.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+    else:
+        assert model.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+
+    # Keep behavior aligned with mtl_tts.generate()
+    if float(exaggeration) != float(model.conds.t3.emotion_adv[0, 0, 0].item()):
+        _cond = model.conds.t3
+        model.conds.t3 = type(_cond)(
+            speaker_emb=_cond.speaker_emb,
+            cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
+            emotion_adv=exaggeration * torch.ones(1, 1, 1),
+        ).to(device=model.device)
+
+    text_tokens = torch.cat([text_tokens, text_tokens], dim=0)
+    sot = model.t3.hp.start_text_token
+    eot = model.t3.hp.stop_text_token
+    text_tokens = torch.nn.functional.pad(text_tokens, (1, 0), value=sot)
+    text_tokens = torch.nn.functional.pad(text_tokens, (0, 1), value=eot)
+
+    with torch.inference_mode():
+        speech_tokens = model.t3.inference(
+            t3_cond=model.conds.t3,
+            text_tokens=text_tokens,
+            max_new_tokens=1000,
+            temperature=temperature,
+            cfg_weight=cfg_weight,
+            repetition_penalty=2.0,
+            min_p=0.05,
+            top_p=1.0,
+        )
+        speech_tokens = speech_tokens[0]
+        speech_tokens = _drop_invalid_tokens(speech_tokens)
+        speech_tokens = speech_tokens.to(model.device)
+
+        wav, _ = model.s3gen.inference(
+            speech_tokens=speech_tokens,
+            ref_dict=model.conds.gen,
+        )
+        wav = wav.squeeze(0).detach().cpu().numpy()
+        if apply_watermark:
+            wav = model.watermarker.apply_watermark(wav, sample_rate=model.sr)
+
+    return torch.from_numpy(wav).unsqueeze(0)
+
+
 def process_one_chunk(
     model, sentence_group, idx, gen_index, this_seed,
     audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, language_id,
     disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate,
     bypass_whisper_checking,
-    retry_attempt_number=1
+    retry_attempt_number=1,
+    validation_text=None,
+    fallback_language=None,
 ):
     candidates = []
+    target_validation_text = validation_text if isinstance(validation_text, str) and validation_text.strip() else sentence_group
+    inline_tag_mode = _is_multilingual_model_instance(model) and (language_id is None) and contains_inline_language_tags(sentence_group)
     try:
         if not sentence_group.strip():
             print(f"\033[32m[DEBUG] Skipping empty sentence group at index {idx}\033[0m")
@@ -1021,7 +1519,19 @@ def process_one_chunk(
                         apply_watermark=not disable_watermark,
                     )
                     sig = inspect.signature(model.generate)
-                    if "language_id" in sig.parameters:
+                    if inline_tag_mode:
+                        with _MODEL_GENERATE_LOCK:
+                            wav = _generate_mtl_single_pass_inline_tags(
+                                model=model,
+                                text=sentence_group,
+                                audio_prompt_path=audio_prompt_path_input,
+                                exaggeration=min(exaggeration_input, 1.0),
+                                temperature=temperature_input,
+                                cfg_weight=cfgw_input,
+                                apply_watermark=not disable_watermark,
+                                fallback_language=fallback_language or "en",
+                            )
+                    elif "language_id" in sig.parameters:
                         wav = model.generate(**gen_kwargs, language_id=language_id)
                     else:
                         wav = model.generate(**gen_kwargs)
@@ -1038,7 +1548,9 @@ def process_one_chunk(
                     candidates.append({
                         'path': candidate_path,
                         'duration': duration,
-                        'sentence_group': sentence_group,
+                        'sentence_group': target_validation_text,
+                        'generation_text': sentence_group,
+                        'language_id': language_id,
                         'cand_idx': cand_idx,
                         'attempt': attempt,
                         'seed': candidate_seed,
@@ -1055,7 +1567,9 @@ def process_one_chunk_deterministic(
     audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, language_id,
     disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate,
     bypass_whisper_checking,
-    retry_attempt_number=1
+    retry_attempt_number=1,
+    validation_text=None,
+    fallback_language=None,
 ):
     """
     Deterministic per-chunk generation that does NOT mutate global RNG.
@@ -1079,12 +1593,14 @@ def process_one_chunk_deterministic(
 
     def _call_generate(_model, _kwargs: dict):
         # Serialize multilingual generation to avoid cross-thread corruption.
-        if getattr(_model, "__class__", type("x", (), {})).__name__ == "ChatterboxMultilingualTTS":
+        if _is_multilingual_model_instance(_model):
             with _MODEL_GENERATE_LOCK:
                 return _model.generate(**_kwargs)
         return _model.generate(**_kwargs)
 
     candidates = []
+    target_validation_text = validation_text if isinstance(validation_text, str) and validation_text.strip() else sentence_group
+    inline_tag_mode = _is_multilingual_model_instance(model) and (language_id is None) and contains_inline_language_tags(sentence_group)
     try:
         if not sentence_group.strip():
             print(f"\033[32m[DEBUG] Skipping empty sentence group at index {idx}\033[0m")
@@ -1128,7 +1644,20 @@ def process_one_chunk_deterministic(
                             language_id=language_id,
                         )
                         gen_kwargs = _filter_generate_kwargs(model, gen_kwargs)
-                        wav = _call_generate(model, gen_kwargs)
+                        if inline_tag_mode:
+                            with _MODEL_GENERATE_LOCK:
+                                wav = _generate_mtl_single_pass_inline_tags(
+                                    model=model,
+                                    text=sentence_group,
+                                    audio_prompt_path=audio_prompt_path_input,
+                                    exaggeration=min(exaggeration_input, 1.0),
+                                    temperature=temperature_input,
+                                    cfg_weight=cfgw_input,
+                                    apply_watermark=not disable_watermark,
+                                    fallback_language=fallback_language or "en",
+                                )
+                        else:
+                            wav = _call_generate(model, gen_kwargs)
                     else:
                         # Fallback: fork RNG state locally and seed inside the scope
                         with torch.random.fork_rng(devices=devices, enabled=True):
@@ -1145,7 +1674,20 @@ def process_one_chunk_deterministic(
                                 language_id=language_id,
                             )
                             gen_kwargs = _filter_generate_kwargs(model, gen_kwargs)
-                            wav = _call_generate(model, gen_kwargs)
+                            if inline_tag_mode:
+                                with _MODEL_GENERATE_LOCK:
+                                    wav = _generate_mtl_single_pass_inline_tags(
+                                        model=model,
+                                        text=sentence_group,
+                                        audio_prompt_path=audio_prompt_path_input,
+                                        exaggeration=min(exaggeration_input, 1.0),
+                                        temperature=temperature_input,
+                                        cfg_weight=cfgw_input,
+                                        apply_watermark=not disable_watermark,
+                                        fallback_language=fallback_language or "en",
+                                    )
+                            else:
+                                wav = _call_generate(model, gen_kwargs)
 
                     candidate_path = f"temp/gen{gen_index+1}_chunk_{idx:03d}_cand_{cand_idx+1}_try{retry_attempt_number}_seed{candidate_seed}.wav"
                     torchaudio.save(candidate_path, wav, model.sr)
@@ -1161,7 +1703,9 @@ def process_one_chunk_deterministic(
                     candidates.append({
                         'path': candidate_path,
                         'duration': duration,
-                        'sentence_group': sentence_group,
+                        'sentence_group': target_validation_text,
+                        'generation_text': sentence_group,
+                        'language_id': language_id,
                         'cand_idx': cand_idx,
                         'attempt': attempt,
                         'seed': candidate_seed,
@@ -1248,11 +1792,16 @@ def generate_batch_tts(
     if not audio_prompt_path_input:
         audio_prompt_path_input = None
 
+    effective_prompt_language = language_id
+    if tts_variant == "multilingual_23lang" and _is_auto_language_mode(language_id):
+        # Auto mode can switch per chunk; keep a stable default voice prompt.
+        effective_prompt_language = "en"
+
     if tts_variant == "multilingual_23lang" and audio_prompt_path_input is None:
-        audio_prompt_path_input = _get_default_mtl_prompt_audio(language_id)
+        audio_prompt_path_input = _get_default_mtl_prompt_audio(effective_prompt_language)
 
     if isinstance(audio_prompt_path_input, str):
-        audio_prompt_path_input = _maybe_download_prompt_audio(audio_prompt_path_input, language_id=language_id)
+        audio_prompt_path_input = _maybe_download_prompt_audio(audio_prompt_path_input, language_id=effective_prompt_language)
 
     # PATCH: Get file basename (to prepend) if a text file was uploaded
     # Support for multiple file uploads
@@ -1389,8 +1938,14 @@ def process_text_for_tts(
 ):
 
     lang_id = None
+    auto_language_mode = False
     if tts_variant == "multilingual_23lang":
-        lang_id = (language_id or "en").lower()
+        normalized_request_lang = _normalize_language_id(language_id)
+        auto_language_mode = (normalized_request_lang == "auto")
+        if auto_language_mode:
+            lang_id = "en" if "en" in SUPPORTED_LANGUAGES else next(iter(SUPPORTED_LANGUAGES), "en")
+        else:
+            lang_id = normalized_request_lang if normalized_request_lang in SUPPORTED_LANGUAGES else "en"
         model = get_or_load_multilingual_model()
     else:
         model = get_or_load_model()
@@ -1428,42 +1983,40 @@ def process_text_for_tts(
         except Exception as e:
             print(f"[WARNING] Could not remove temp entry {p!r}: {e}")
 
-    sentences = split_into_sentences(text)
-    print(f"\033[32m[DEBUG] Split text into {len(sentences)} sentences.\033[0m")
-
-    def enforce_min_chunk_length(chunks, min_len=20, max_len=300):
-        out = []
-        i = 0
-        while i < len(chunks):
-            current = chunks[i].strip()
-            if len(current) >= min_len or i == len(chunks) - 1:
-                out.append(current)
-                i += 1
-            else:
-                # Try to merge with the next chunk if possible
-                if i + 1 < len(chunks):
-                    merged = current + " " + chunks[i + 1]
-                    if len(merged) <= max_len:
-                        out.append(merged)
-                        i += 2
-                    else:
-                        out.append(current)
-                        i += 1
-                else:
-                    out.append(current)
-                    i += 1
-        return out
-
-    sentence_groups = None
-    if enable_batching:
-        sentence_groups = group_sentences(sentences, max_chars=300)
-        if smart_batch_short_sentences:  # NEW: now works as post-processing!
-            sentence_groups = enforce_min_chunk_length(sentence_groups)
-    elif smart_batch_short_sentences:
-        sentence_groups = smart_append_short_sentences(sentences)
-        sentence_groups = enforce_min_chunk_length(sentence_groups)
+    inline_tag_connected_mode = False
+    if tts_variant == "multilingual_23lang" and contains_inline_language_tags(text):
+        inline_tag_connected_mode = True
+        stripped_for_validation = strip_inline_language_tags(text).strip()
+        if not stripped_for_validation:
+            raise ValueError("Inline language tags were found, but no synthesizeable text remained.")
+        # Connected prosody mode: keep one generation request and switch languages within it.
+        chunk_plan = [
+            {
+                "text": text,
+                "language_id": None,
+                "validation_text": stripped_for_validation,
+            }
+        ]
+        print("[DEBUG] Inline language tags detected. Using single-pass multilingual generation for connected prosody.")
     else:
-        sentence_groups = sentences
+        sentences = split_into_sentences(text)
+        print(f"\033[32m[DEBUG] Split text into {len(sentences)} sentences.\033[0m")
+        chunk_plan = build_chunk_plan(
+            sentences=sentences,
+            enable_batching=enable_batching,
+            smart_batch_short_sentences=smart_batch_short_sentences,
+            default_language=lang_id,
+            auto_detect=auto_language_mode,
+        )
+    if not chunk_plan:
+        raise ValueError("No valid text chunks were produced after preprocessing.")
+
+    if auto_language_mode and not inline_tag_connected_mode:
+        lang_counts = {}
+        for chunk in chunk_plan:
+            chunk_lang = chunk.get("language_id") or (lang_id or "en")
+            lang_counts[chunk_lang] = lang_counts.get(chunk_lang, 0) + 1
+        print(f"[DEBUG] Auto language routing enabled. Chunk language distribution: {lang_counts}")
 
     output_paths = []
     for gen_index in range(num_generations):
@@ -1480,17 +2033,18 @@ def process_text_for_tts(
 
         # -------- CHUNK GENERATION --------
         if enable_parallel:
-            total_chunks = len(sentence_groups)
+            total_chunks = len(chunk_plan)
             completed = 0
             with ThreadPoolExecutor(max_workers=num_parallel_workers) as executor:
                 futures = [
                     executor.submit(
                         process_one_chunk_deterministic,
-                        model, group, idx, gen_index, this_seed,
-                        audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, lang_id,
-                        disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking
+                        model, chunk_info["text"], idx, gen_index, this_seed,
+                        audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, chunk_info["language_id"],
+                        disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking,
+                        1, chunk_info.get("validation_text"), lang_id
                     )
-                    for idx, group in enumerate(sentence_groups)
+                    for idx, chunk_info in enumerate(chunk_plan)
                 ]
                 for future in as_completed(futures):
                     idx, candidates = future.result()
@@ -1500,11 +2054,12 @@ def process_text_for_tts(
                     print(f"\033[36m[PROGRESS] Generated chunk {completed}/{total_chunks} ({percent}%)\033[0m")
         else:
             # Sequential mode: Process chunks one by one
-            for idx, group in enumerate(sentence_groups):
+            for idx, chunk_info in enumerate(chunk_plan):
                 idx, candidates = process_one_chunk_deterministic(
-                    model, group, idx, gen_index, this_seed,
-                    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, lang_id,
-                    disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking
+                    model, chunk_info["text"], idx, gen_index, this_seed,
+                    audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, chunk_info["language_id"],
+                    disable_watermark, num_candidates_per_chunk, max_attempts_per_candidate, bypass_whisper_checking,
+                    1, chunk_info.get("validation_text"), lang_id
                 )
                 chunk_candidate_map[idx] = candidates
 
@@ -1570,14 +2125,17 @@ def process_text_for_tts(
                             executor.submit(
                                 process_one_chunk_deterministic,
                                 model,
-                                chunk_candidate_map[chunk_idx][0]['sentence_group'] if chunk_candidate_map[chunk_idx] else sentence_groups[chunk_idx],
+                                chunk_candidate_map[chunk_idx][0]['generation_text'] if chunk_candidate_map[chunk_idx] else chunk_plan[chunk_idx]["text"],
                                 chunk_idx,
                                 gen_index,
                                 this_seed,  # base; per-candidate attempts derive inside deterministic function
-                                audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input, lang_id,
+                                audio_prompt_path_input, exaggeration_input, temperature_input, cfgw_input,
+                                chunk_candidate_map[chunk_idx][0]['language_id'] if chunk_candidate_map[chunk_idx] else chunk_plan[chunk_idx]["language_id"],
                                 disable_watermark, num_candidates_per_chunk, 1,
                                 bypass_whisper_checking,
-                                chunk_attempts[chunk_idx] + 1
+                                chunk_attempts[chunk_idx] + 1,
+                                chunk_plan[chunk_idx].get("validation_text"),
+                                lang_id
                             )
                             for chunk_idx in still_need_retry
                         ]
@@ -1937,7 +2495,10 @@ def main(server_name=None, server_port=None, share=False):
             langs_line = ", ".join(sorted(SUPPORTED_LANGUAGES.keys()))
         else:
             langs_line = "en,de,fr,es,zh,ja,ko"
-        gr.Markdown(f"**Multilingual:** choose `multilingual_23lang` and set Language ID (codes: {langs_line}) for non-English synthesis. Leave `extended_en` for English-only.")
+        gr.Markdown(
+            f"**Multilingual:** choose `multilingual_23lang` and set Language ID to one code ({langs_line}) for fixed-language synthesis, "
+            "set Language ID to `auto` for heuristic detection, or use inline tags like `[de]...[/de]` / `[lang=de]...[/lang]` for exact switching."
+        )
         with gr.Tabs():
             # TTS Tab (your original interface)
             with gr.Tab("TTS & Multi-Gen"):
@@ -1951,13 +2512,13 @@ def main(server_name=None, server_port=None, share=False):
                             label="Model Variant",
                             info="Use multilingual_23lang for non-English (de/fr/es/zh/etc)."
                         )
-                        language_choices = sorted(SUPPORTED_LANGUAGES.keys()) if SUPPORTED_LANGUAGES else ["en", "de", "fr", "es", "zh"]
+                        language_choices = (["auto"] + sorted(SUPPORTED_LANGUAGES.keys())) if SUPPORTED_LANGUAGES else ["auto", "en", "de", "fr", "es", "zh"]
                         language_id_dropdown = gr.Dropdown(
                             choices=language_choices,
                             value=settings.get("language_id_dropdown", "en"),
                             allow_custom_value=True,
                             label="Language ID (multilingual only)",
-                            info="Language code like en, de, fr, es, zh. Ignored when using extended_en."
+                            info="Use a fixed code like en/de/fr/es/zh, auto for heuristic routing, or inline tags ([de]...[/de]) for exact multilingual switching with connected prosody."
                         )
                         separate_files_checkbox = gr.Checkbox(label="Generate separate audio files per text file", value=settings["separate_files_checkbox"])
                         ref_audio_input = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Reference Audio (Optional)")
@@ -2291,6 +2852,11 @@ def main(server_name=None, server_port=None, share=False):
               Removes redundant spaces and blank lines, creating cleaner input for the model.
             - **Convert 'J.R.R.' to 'J R R':**  
               Automatically converts abbreviations written with periods to a spaced-out format (improves pronunciation of initials/names).
+            - **Multilingual auto-inference (Language ID = `auto`):**
+              In `multilingual_23lang` mode, setting Language ID to `auto` infers language per sentence/chunk and switches language tags automatically for mixed-language text.
+            - **Inline language tags (recommended for precise switching):**
+              Use `[de]...[/de]` or `[lang=de]...[/lang]` around spans.
+              When tags are present in `multilingual_23lang`, generation runs in a single connected pass and switches language tokens inline for better prosody continuity.
 
             ---
 

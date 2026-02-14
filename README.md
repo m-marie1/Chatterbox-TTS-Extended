@@ -46,6 +46,8 @@ Chatterbox-TTS-Extended is a *power-user TTS pipeline* for advanced single and b
 | Sound word remove/replace                 | ✔             | Yes          |
 | Inline reference number removal           | ✔             | Yes          |
 | Dot-letter ("J.R.R.") correction          | ✔             | Yes          |
+| Multilingual auto language routing        | ✔             | Yes          |
+| Inline language tag switching             | ✔             | Yes          |
 | Lowercase & whitespace normalization      | ✔             | Yes          |
 | Auto-Editor post-processing               | ✔             | Yes          |
 | **pyrnnoise denoising (RNNoise)**         | ✔             | Yes          |
@@ -94,6 +96,10 @@ Chatterbox-TTS-Extended is a *power-user TTS pipeline* for advanced single and b
 ## Batching, Chunking & Grouping
 
 - **Sentence batching:** Groups sentences up to ~300 characters per chunk (adjustable in code).
+- **Auto language routing (multilingual mode):** Set `Language ID` to `auto` to infer language per sentence/chunk and switch language IDs automatically inside one input.
+- **Inline language tags (exact control):** Use `[de]...[/de]` or `[lang=de]...[/lang]` to force language on specific spans.
+- **Connected prosody for tagged text:** When inline tags are detected in multilingual mode, synthesis runs in one connected generation pass so language switches stay in the same prosodic flow.
+- **Language-safe batching:** In auto mode, chunk grouping respects language boundaries to avoid merging different languages into one chunk.
 - **Smart-append short sentences:** When batching is off, merges very short sentences for smoother prosody.
 - **Recursive long sentence splitting:** Automatically splits long sentences at `; : - ,` or by character count.
 - **Parallel chunk processing:** Multiple chunks are generated at once for speed (user control).
