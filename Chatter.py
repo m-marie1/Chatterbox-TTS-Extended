@@ -1431,6 +1431,35 @@ def _tokenize_inline_tagged_multilingual_text(model, tagged_text: str, fallback_
         if not span_text:
             continue
 
+        # Normalize control whitespace for tokenizer stability.
+        span_text = span_text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+        if not span_text:
+            continue
+
+        # Preserve pauses from whitespace-only spans without injecting language tokens.
+        if not span_text.strip():
+            token_ids.extend(model.tokenizer.encode(span_text, language_id=None))
+            continue
+
+        # Align punctuation cleanup with multilingual app expectations for stability.
+        for old_seq, new_seq in (
+            ("...", ", "),
+            ("…", ", "),
+            (":", ","),
+            (" - ", ", "),
+            (";", ", "),
+            ("—", "-"),
+            ("–", "-"),
+            ("“", "\""),
+            ("”", "\""),
+            ("‘", "'"),
+            ("’", "'"),
+        ):
+            span_text = span_text.replace(old_seq, new_seq)
+        span_text = " ".join(span_text.split())
+        if not span_text:
+            continue
+
         span_lang = _normalize_language_id(span.get("language_id"))
         if span_lang not in SUPPORTED_LANGUAGES:
             # Keep untagged segments in a stable fallback language.
